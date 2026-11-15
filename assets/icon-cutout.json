@@ -1,0 +1,7 @@
+{
+  "source": "icon.jpg",
+  "output": "icon-cutout.png",
+  "mode": "built-in image editing",
+  "transparent_background": true,
+  "prompt": "Use case: background-extraction. Edit target: the provided Pichle app logo. Remove the entire pale mint rounded-square tile, white outer background, gray edge and drop shadow. Deliver a clean, truly transparent PNG of ONLY the original logo: lime green storefront canopy and squared frame, dark forest green car with its two white headlight shapes, and dark forest green takeaway drink. Preserve the source artwork's exact shapes, relative proportions, arrangement, colors, small gaps, and the white headlights. All spaces between the logo elements, including the car windshield and gaps between awning panels, must become transparent. No new shapes, no lettering, no redesign, no enclosing background or new shadow. Keep the complete logo centered with modest transparent padding, without clipping."
+}

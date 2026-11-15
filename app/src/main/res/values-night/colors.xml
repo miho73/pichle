@@ -1,0 +1,10 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <color name="pichle_primary">#33C69A</color>
+    <color name="pichle_on_primary">#071E18</color>
+    <color name="pichle_background">#101416</color>
+    <color name="pichle_surface">#1A2225</color>
+    <color name="pichle_text">#F5F7F7</color>
+    <color name="pichle_text_secondary">#ADB6BB</color>
+    <color name="pichle_divider">#354046</color>
+</resources>
