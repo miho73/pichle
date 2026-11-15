@@ -1,3 +1,0 @@
-# The full SDK explorer invokes public API interfaces and builds listener proxies.
--keep class ai.pleos.playground.vehicle.** { *; }
--keepattributes Signature,InnerClasses,EnclosingMethod,RuntimeVisibleAnnotations,AnnotationDefault

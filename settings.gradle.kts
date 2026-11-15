@@ -25,5 +25,5 @@ dependencyResolutionManagement {
     }
 }
 
-rootProject.name = "DriveAway"
+rootProject.name = "Pichle"
 include(":app")
