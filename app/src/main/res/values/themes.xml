@@ -1,7 +1,7 @@
 <resources>
     <style name="Theme.Pichle" parent="Theme.MaterialComponents.DayNight.NoActionBar">
-        <item name="colorPrimary">#1B7553</item>
-        <item name="colorSecondary">#1B7553</item>
+        <item name="colorPrimary">#2AC1BC</item>
+        <item name="colorSecondary">#2AC1BC</item>
         <item name="android:fontFamily">sans</item>
         <item name="android:windowLightStatusBar">true</item>
         <item name="android:statusBarColor">#F5F7F4</item>

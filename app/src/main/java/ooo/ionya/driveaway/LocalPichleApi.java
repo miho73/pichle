@@ -1,19 +1,20 @@
 package ooo.ionya.driveaway;
 
-import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.List;
-import java.util.Locale;
 
 /** Local-only stand-in for the Pichle backend, so the end-to-end demo works offline. */
-public final class DemoPichleApi implements PichleApi {
+public final class LocalPichleApi implements PichleApi {
     private int nextOrder = 104;
 
     @Override public List<StoreSummary> findNearbyStores(String coarseAreaId) {
         return Arrays.asList(
-                new StoreSummary("morningbrew-songdo", "모닝브루 송도점", "커피 · DT", 1200, 4, 5, true),
-                new StoreSummary("burgerstation-central", "버거스테이션 센트럴점", "버거 · DT", 2400, 7, 9, true),
-                new StoreSummary("dailycup-incheon", "데일리컵 인천대점", "커피 · DT", 3100, 3, 2, false));
+                new StoreSummary("morningbrew-songdo", "모닝브루 송도점", "커피 · DT", 1200, 4, 5, true,
+                        37.3887, 126.6433, "인천광역시 연수구 송도동"),
+                new StoreSummary("burgerstation-central", "버거스테이션 센트럴점", "버거 · DT", 2400, 7, 9, true,
+                        37.3867, 126.6508, "인천광역시 연수구 송도동"),
+                new StoreSummary("dailycup-incheon", "데일리컵 인천대점", "커피 · DT", 3100, 3, 2, false,
+                        37.3790, 126.6352, "인천광역시 연수구 송도동"));
     }
 
     @Override public List<MenuItem> getMenu(String storeId) {
@@ -32,7 +33,7 @@ public final class DemoPichleApi implements PichleApi {
     }
 
     @Override public OrderReceipt submitOrder(OrderRequest request) {
-        return new OrderReceipt("DEMO-" + nextOrder, "RECEIVED", "P-" + nextOrder++);
+        return new OrderReceipt("PICHLE-" + nextOrder, "RECEIVED", "P-" + nextOrder++);
     }
 
     @Override public void submitVisitSignal(VisitSignal signal) {

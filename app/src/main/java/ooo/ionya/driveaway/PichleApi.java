@@ -20,14 +20,17 @@ public interface PichleApi {
     void submitVisitSignal(VisitSignal signal) throws Exception;
 
     final class StoreSummary {
-        public final String id, name, category;
+        public final String id, name, category, address;
+        public final double latitude, longitude;
         public final int distanceMeters, driveMinutes, waitMinutes;
         public final boolean electronicOrdering;
         public StoreSummary(String id, String name, String category, int distanceMeters,
-                            int driveMinutes, int waitMinutes, boolean electronicOrdering) {
+                            int driveMinutes, int waitMinutes, boolean electronicOrdering,
+                            double latitude, double longitude, String address) {
             this.id=id; this.name=name; this.category=category; this.distanceMeters=distanceMeters;
             this.driveMinutes=driveMinutes; this.waitMinutes=waitMinutes;
             this.electronicOrdering=electronicOrdering;
+            this.latitude=latitude; this.longitude=longitude; this.address=address;
         }
     }
 
