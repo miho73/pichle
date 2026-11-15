@@ -7,4 +7,11 @@
       <color name="teal_700">#FF018786</color>
       <color name="black">#FF000000</color>
       <color name="white">#FFFFFFFF</color>
+      <color name="pichle_primary">#008462</color>
+      <color name="pichle_on_primary">#FFFFFF</color>
+      <color name="pichle_background">#F3F4F4</color>
+      <color name="pichle_surface">#FFFFFF</color>
+      <color name="pichle_text">#141719</color>
+      <color name="pichle_text_secondary">#747A7D</color>
+      <color name="pichle_divider">#D6DADC</color>
   </resources>

@@ -38,6 +38,8 @@ public final class OrderSpeechController implements AutoCloseable {
     private String failure = "음성 서비스를 사용할 수 없습니다.";
     private int generation;
     private boolean playbackStarted;
+    private int volumeStream = -1, previousVolume = -1, requestedVolume = -1;
+    private String volumeNotice = "";
 
     private final EventListener pleosEvents = new EventListener() {
         @Override public void onReady() { }
@@ -106,6 +108,7 @@ public final class OrderSpeechController implements AutoCloseable {
         }
         if (activeText != null) { status("주문을 읽고 있습니다. 다시 들으려면 재생을 중지해 주세요."); return; }
         if (engine == Engine.FAILED) { status(failure); return; }
+        volumeNotice = "";
         pendingText = text.trim();
         if (engine == Engine.PLEOS || engine == Engine.ANDROID) playPending();
         else status("음성 준비가 끝나면 주문을 읽습니다.");
@@ -122,6 +125,7 @@ public final class OrderSpeechController implements AutoCloseable {
         playbackStarted = false;
         int token = ++generation;
         try {
+            maximizeSpeechVolume();
             status("주문 음성을 준비하고 있습니다.");
             if (engine == Engine.PLEOS) pleos.speak(activeText, true);
             else if (engine == Engine.ANDROID) {
@@ -212,6 +216,7 @@ public final class OrderSpeechController implements AutoCloseable {
         ++generation;
         activeText = null;
         utteranceId = null;
+        restoreSpeechVolume();
         abandonFocus();
         status("주문 읽기를 마쳤습니다.");
     }
@@ -224,6 +229,7 @@ public final class OrderSpeechController implements AutoCloseable {
         failure = message;
         if (engine == Engine.STARTING_ANDROID) engine = Engine.FAILED;
         if (androidTts != null) androidTts.stop();
+        restoreSpeechVolume();
         abandonFocus();
         status(message);
     }
@@ -240,12 +246,55 @@ public final class OrderSpeechController implements AutoCloseable {
         if (engine == Engine.PLEOS || engine == Engine.ANDROID) ++generation;
         try { if (pleos != null) pleos.stop(); } catch (RuntimeException | LinkageError ignored) { }
         if (androidTts != null) androidTts.stop();
+        restoreSpeechVolume();
         abandonFocus();
         if (hadRequest) status("주문 읽기를 중지했습니다.");
     }
 
+    /** Change volume only for an explicit playback request, never while preparing the engine. */
+    private void maximizeSpeechVolume() {
+        if (audio == null || volumeStream >= 0) return;
+        try {
+            if (audio.isVolumeFixed()) {
+                volumeNotice = "차량 설정에서 음량을 조절해주세요.";
+                return;
+            }
+            int stream = attributes.getVolumeControlStream();
+            if (stream < 0) stream = AudioManager.STREAM_MUSIC;
+            int maximum = audio.getStreamMaxVolume(stream);
+            if (maximum <= 0) return;
+            // Navigation speech uses the stream selected by its AudioAttributes, not the alarm/call stream.
+            previousVolume = audio.getStreamVolume(stream);
+            requestedVolume = maximum;
+            volumeStream = stream;
+            audio.setStreamVolume(stream, maximum, 0);
+            if (audio.getStreamVolume(stream) != maximum)
+                volumeNotice = "차량 설정에서 음량을 조절해주세요.";
+        } catch (RuntimeException error) {
+            volumeNotice = "차량 설정에서 음량을 조절해주세요.";
+        }
+    }
+
+    private void restoreSpeechVolume() {
+        if (audio == null || volumeStream < 0) return;
+        try {
+            // A changed value belongs to the user or the platform; leave that choice in place.
+            if (previousVolume >= 0 && audio.getStreamVolume(volumeStream) == requestedVolume)
+                audio.setStreamVolume(volumeStream, previousVolume, 0);
+        } catch (RuntimeException ignored) {
+            volumeNotice = "기존 음량은 차량 설정에서 조절해주세요.";
+        } finally {
+            volumeStream = -1;
+            previousVolume = -1;
+            requestedVolume = -1;
+        }
+    }
+
     private void abandonFocus() { if (audio != null) audio.abandonAudioFocusRequest(focus); }
-    private void status(String message) { if (engine != Engine.CLOSED) listener.onStatus(message); }
+    private void status(String message) {
+        if (engine != Engine.CLOSED)
+            listener.onStatus(message + (volumeNotice.isEmpty() ? "" : " " + volumeNotice));
+    }
     private void releasePleos() {
         if (pleos == null) return;
         try { pleos.stop(); } catch (RuntimeException | LinkageError ignored) { }

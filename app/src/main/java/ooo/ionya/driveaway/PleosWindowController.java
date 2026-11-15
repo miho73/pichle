@@ -96,15 +96,17 @@ public final class PleosWindowController {
         // A grouped area must not accidentally lower additional passenger windows.
         WindowArea driver = new WindowArea(WindowValue.ROW_1_LEFT);
         AreaBounds<Integer> bounds = supported.get(driver);
-        if (bounds == null || bounds.getMaxValue() == null || bounds.getMaxValue() <= 0) {
+        if (bounds == null || bounds.getMinValue() == null || bounds.getMaxValue() == null
+                || bounds.getMaxValue() <= 0 || bounds.getMinValue() > bounds.getMaxValue()) {
             finish(request, callback, false, "운전석 창문의 지원 범위를 확인할 수 없어요.");
             return;
         }
-        // WINDOW_POS follows Automotive semantics: maximum is fully open, zero is closed.
-        int fullyOpen = bounds.getMaxValue();
+        // Pleos forwards WINDOW_POS unchanged: Android defines 0 as closed and the supported maximum as fully open.
+        // Use this window area's reported maximum instead of treating the value as a percentage closed.
+        int targetPosition = bounds.getMaxValue();
         try {
-            vehicle.getWindow().setWindowPosition(driver, fullyOpen, (area, value) -> {
-                main.post(() -> verifyWindowPosition(request, driver, fullyOpen, callback));
+            vehicle.getWindow().setWindowPosition(driver, targetPosition, (area, value) -> {
+                main.post(() -> verifyWindowPosition(request, driver, targetPosition, callback));
                 return Unit.INSTANCE;
             }, error -> {
                 main.post(() -> finish(request, callback, false, describe(error)));
@@ -115,26 +117,26 @@ public final class PleosWindowController {
         }
     }
 
-    private void verifyWindowPosition(int request, WindowArea driver, int fullyOpen, Callback callback) {
+    private void verifyWindowPosition(int request, WindowArea driver, int targetPosition, Callback callback) {
         if (!active(request)) return;
         if (timeout != null) main.removeCallbacks(timeout);
         timeout = () -> finish(request, callback, false,
                 "내림 요청은 전달했지만 창문 위치가 아직 변경되지 않았어요. 차량 상태를 확인해 주세요.");
         main.postDelayed(timeout, 8000);
         listener.onStatus("창문 내림 요청을 전달했어요. 창문 위치를 확인하고 있어요.");
-        pollWindowPosition(request, driver, fullyOpen, callback);
+        pollWindowPosition(request, driver, targetPosition, callback);
     }
 
-    private void pollWindowPosition(int request, WindowArea driver, int fullyOpen, Callback callback) {
+    private void pollWindowPosition(int request, WindowArea driver, int targetPosition, Callback callback) {
         if (!active(request)) return;
         try {
             vehicle.getWindow().getCurrentWindowPosition(driver, position -> {
                 main.post(() -> {
                     if (!active(request)) return;
-                    if (position != null && position == fullyOpen) {
+                    if (position != null && position == targetPosition) {
                         finish(request, callback, true, "운전석 창문이 내려갔어요.");
                     } else {
-                        positionPoll = () -> pollWindowPosition(request, driver, fullyOpen, callback);
+                        positionPoll = () -> pollWindowPosition(request, driver, targetPosition, callback);
                         main.postDelayed(positionPoll, 500);
                     }
                 });

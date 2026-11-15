@@ -1,11 +1,15 @@
 <resources>
     <style name="Theme.Pichle" parent="Theme.MaterialComponents.DayNight.NoActionBar">
-        <item name="colorPrimary">#2AC1BC</item>
-        <item name="colorSecondary">#2AC1BC</item>
-        <item name="android:fontFamily">sans</item>
-        <item name="android:windowLightStatusBar">true</item>
-        <item name="android:statusBarColor">#F5F7F4</item>
-        <item name="android:navigationBarColor">#F5F7F4</item>
-        <item name="android:windowBackground">#F5F7F4</item>
+        <item name="colorPrimary">@color/pichle_primary</item>
+        <item name="colorSecondary">@color/pichle_primary</item>
+        <item name="colorOnPrimary">@color/pichle_on_primary</item>
+        <item name="colorSurface">@color/pichle_surface</item>
+        <item name="colorOnSurface">@color/pichle_text</item>
+        <item name="android:colorBackground">@color/pichle_background</item>
+        <item name="android:windowLightStatusBar">false</item>
+        <item name="android:windowLightNavigationBar">false</item>
+        <item name="android:statusBarColor">@color/pichle_background</item>
+        <item name="android:navigationBarColor">@color/pichle_background</item>
+        <item name="android:windowBackground">@color/pichle_background</item>
     </style>
 </resources>

@@ -1,6 +1,7 @@
 package ooo.ionya.driveaway;
 
 import android.app.AlertDialog;
+import android.content.Intent;
 import android.graphics.Color;
 import android.graphics.Typeface;
 import android.graphics.drawable.GradientDrawable;
@@ -9,6 +10,7 @@ import android.view.Gravity;
 import android.view.View;
 import android.widget.Button;
 import android.widget.EditText;
+import android.widget.GridLayout;
 import android.widget.LinearLayout;
 import android.widget.ScrollView;
 import android.widget.TextView;
@@ -25,9 +27,7 @@ import java.util.Locale;
 
 /** Screen-based ordering flow. Vehicle operations stay in the dedicated SDK controllers. */
 public class MainActivity extends AppCompatActivity {
-    private static final int BG = Color.rgb(246, 247, 248), INK = Color.rgb(34, 34, 34);
-    private static final int MUTED = Color.rgb(113, 116, 119), LINE = Color.rgb(231, 233, 235);
-    private static final int MINT = Color.rgb(42, 193, 188), PALE = Color.rgb(232, 248, 246);
+    private int BG, INK, MUTED, LINE, PRIMARY, SURFACE, ON_PRIMARY;
     private final PichleApi api = new LocalPichleApi();
     private final List<PichleApi.StoreSummary> stores = new ArrayList<>();
     private final List<PichleApi.MenuItem> menu = new ArrayList<>();
@@ -49,9 +49,19 @@ public class MainActivity extends AppCompatActivity {
     private String draftNote = "", category = "전체", method = "";
     private String voiceStatus = "음성 준비 중", navigationStatus = "", windowStatus = "";
     private boolean arrived, voiceDelivered, submitting, destroyed;
+    private int developerTapCount;
+    private long developerTapStarted;
 
     @Override public void onCreate(Bundle state) {
         super.onCreate(state);
+        AppTaskIcon.apply(this);
+        BG = getColor(R.color.pichle_background);
+        INK = getColor(R.color.pichle_text);
+        MUTED = getColor(R.color.pichle_text_secondary);
+        LINE = getColor(R.color.pichle_divider);
+        PRIMARY = getColor(R.color.pichle_primary);
+        SURFACE = getColor(R.color.pichle_surface);
+        ON_PRIMARY = getColor(R.color.pichle_on_primary);
         favorites.addAll(getPreferences(MODE_PRIVATE).getStringSet("favorites", Collections.emptySet()));
         try {
             stores.addAll(api.findNearbyStores("songdo"));
@@ -113,14 +123,16 @@ public class MainActivity extends AppCompatActivity {
         });
         setContentView(root);
         LinearLayout appbar = row();
-        appbar.setBackgroundColor(Color.WHITE);
+        appbar.setBackgroundColor(SURFACE);
         appbar.setPadding(dp(24), dp(8), dp(24), dp(8));
         if (screen != OrderFlow.STORES) {
             Button back = button("‹ 뒤로", false, this::goBack);
+            back.setBackgroundColor(Color.TRANSPARENT);
             appbar.addView(back, params(dp(104), dp(52)));
         }
         TextView brand = text("Pichle", 23, INK, true);
         brand.setGravity(Gravity.CENTER_VERTICAL);
+        brand.setOnClickListener(view -> openDeveloperMode());
         LinearLayout.LayoutParams brandLp = new LinearLayout.LayoutParams(0, dp(52), 1);
         brandLp.setMarginStart(screen == OrderFlow.STORES ? 0 : dp(18));
         appbar.addView(brand, brandLp);
@@ -142,7 +154,7 @@ public class MainActivity extends AppCompatActivity {
         content = column(); content.setPadding(dp(28), 0, dp(28), dp(24));
         scroll.addView(content, new ScrollView.LayoutParams(-1, -2));
         root.addView(scroll, new LinearLayout.LayoutParams(-1, 0, 1));
-        footer = column(); footer.setBackgroundColor(Color.WHITE);
+        footer = column(); footer.setBackgroundColor(SURFACE);
         footer.setPadding(dp(24), dp(14), dp(24), dp(18));
         footer.setVisibility(View.GONE);
         root.addView(footer, params(-1, -2));
@@ -151,10 +163,10 @@ public class MainActivity extends AppCompatActivity {
     private void showStores() {
         page("송도동 주변 매장", "이동시간 + 예상 대기시간 순");
         LinearLayout filters = row();
-        for (String filter : new String[]{"전체", "커피", "버거", "즐겨찾기"}) {
+        for (String filter : new String[]{"전체", "커피", "버거", "샌드위치", "즐겨찾기"}) {
             Button chip = button(filter, filter.equals(category), () -> { category = filter; render(); });
             LinearLayout.LayoutParams cp = new LinearLayout.LayoutParams(0, dp(50), 1);
-            cp.setMarginEnd(dp(8)); filters.addView(chip, cp);
+            filters.addView(chip, cp);
         }
         content.addView(filters, params(-1, -2));
         List<PichleApi.StoreSummary> visible = new ArrayList<>();
@@ -167,7 +179,11 @@ public class MainActivity extends AppCompatActivity {
             addText(content, category.equals("즐겨찾기") ? "즐겨찾기한 매장이 없습니다." : "표시할 매장이 없습니다.", 18, MUTED, false, 32);
             return;
         }
-        LinearLayout group = itemGroup();
+        GridLayout group = new GridLayout(this);
+        group.setColumnCount(3);
+        group.setAlignmentMode(GridLayout.ALIGN_MARGINS);
+        group.setUseDefaultMargins(false);
+        int storeIndex = 0;
         for (PichleApi.StoreSummary store : visible) {
             LinearLayout card = card();
             LinearLayout title = row();
@@ -177,17 +193,40 @@ public class MainActivity extends AppCompatActivity {
                 getPreferences(MODE_PRIVATE).edit().putStringSet("favorites", new HashSet<>(favorites)).apply();
                 render();
             });
+            heart.setBackgroundColor(Color.TRANSPARENT);
             heart.setContentDescription(store.name + " 즐겨찾기");
             title.addView(heart, params(dp(52), dp(52))); card.addView(title);
             addText(card, store.category + " · " + String.format(Locale.KOREA, "%.1fkm", store.distanceMeters / 1000.0), 16, MUTED, false, 8);
             addText(card, "총 " + (store.driveMinutes + store.waitMinutes) + "분", 30, INK, true, 26);
             addText(card, "이동 " + store.driveMinutes + "분 · 대기 " + store.waitMinutes + "분", 17, MUTED, false, 8);
-            addText(card, store.electronicOrdering ? "전자 주문 가능" : "음성 주문", 15, Color.rgb(20, 125, 119), true, 18);
+            addText(card, store.electronicOrdering ? "전자 주문 가능" : "음성 주문", 15, PRIMARY, true, 18);
+            card.addView(new View(this), new LinearLayout.LayoutParams(-1, 0, 1));
             Button choose = button("메뉴 보기", true, () -> chooseStore(store));
             add(card, choose, 24, dp(58));
-            addGrouped(group, card);
+            addStoreCell(group, card, storeIndex++);
         }
+        // Reserve empty columns so one or two filtered stores keep the same card width.
+        while (storeIndex % 3 != 0) addStoreCell(group, new View(this), storeIndex++);
         add(content, group, 18, -2);
+    }
+
+    private void openDeveloperMode() {
+        long now = android.os.SystemClock.elapsedRealtime();
+        if (now - developerTapStarted > 4000) { developerTapCount = 0; developerTapStarted = now; }
+        if (++developerTapCount < 7) return;
+        developerTapCount = 0;
+        saveDraftNote();
+        if (speech != null) speech.stop();
+        startActivity(new Intent(this, DeveloperActivity.class));
+    }
+
+    private void addStoreCell(GridLayout grid, View child, int index) {
+        GridLayout.LayoutParams p = new GridLayout.LayoutParams(
+                GridLayout.spec(index / 3, GridLayout.FILL), GridLayout.spec(index % 3, 1f));
+        p.width = 0; p.height = -2;
+        p.leftMargin = index % 3 == 0 ? 0 : dp(16);
+        p.topMargin = index < 3 ? 0 : dp(16);
+        grid.addView(child, p);
     }
 
     private void chooseStore(PichleApi.StoreSummary store) {
@@ -506,7 +545,7 @@ public class MainActivity extends AppCompatActivity {
     private LinearLayout row() { LinearLayout v = new LinearLayout(this); v.setOrientation(LinearLayout.HORIZONTAL); v.setGravity(Gravity.CENTER_VERTICAL); return v; }
     private LinearLayout card() {
         LinearLayout c = column(); c.setPadding(dp(24), dp(22), dp(24), dp(22));
-        GradientDrawable background = fill(Color.WHITE, 12); background.setStroke(dp(1), LINE); c.setBackground(background); return c;
+        GradientDrawable background = fill(SURFACE, 4); background.setStroke(dp(1), LINE); c.setBackground(background); return c;
     }
     private Button button(String label, boolean primary, Runnable action) {
         Button b = new Button(this); b.setText(label); b.setTextSize(18); b.setAllCaps(false); b.setTypeface(null, Typeface.BOLD);
@@ -515,9 +554,9 @@ public class MainActivity extends AppCompatActivity {
     }
     private void styleButton(Button b, boolean primary) {
         b.setBackgroundTintList(null);
-        GradientDrawable background = fill(primary ? MINT : Color.WHITE, 9);
+        GradientDrawable background = fill(primary ? PRIMARY : SURFACE, 3);
         if (!primary) background.setStroke(dp(1), LINE);
-        b.setBackground(background); b.setTextColor(primary ? Color.rgb(7, 45, 44) : INK);
+        b.setBackground(background); b.setTextColor(primary ? ON_PRIMARY : INK);
     }
     private TextView text(String label, int size, int color, boolean bold) {
         TextView v = new TextView(this); v.setText(label); v.setTextSize(size); v.setTextColor(color);

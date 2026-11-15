@@ -6,6 +6,8 @@ Pleos 차량에서 드라이브스루 매장을 고르고, 이동·예상 대기
 
 매장 목록 → 메뉴 → 옵션·수량 → 장바구니 → 주문 방법 → 주문 전송 또는 음성 주문 → 이동 → 수령 순서로 화면을 구분했습니다. 비제휴 매장은 장바구니에서 음성 주문 화면으로 이어집니다. 음성 재생·중지는 음성 주문 화면, 길안내는 이동 화면, 창문 제어는 수령 화면에서 제공합니다. 주요 동작은 화면 하단에 고정합니다.
 
+매장 데이터는 6개이며 매장 목록은 3열 그리드입니다. 필터 결과가 1~2개인 경우에도 빈 열을 유지해 카드 폭이 바뀌지 않습니다. Pleos의 밝은/어두운 시스템 테마에 맞춰 평면 패널과 에메랄드색 포인트를 사용합니다.
+
 1. 주변 드라이브스루 목록과 이동시간·예상 대기시간 비교
 2. 매장 메뉴 및 옵션 확인, 즐겨찾기
 3. 주문 목록 확인과 옵션 메모
@@ -41,13 +43,26 @@ APK 경로: `app/build/outputs/apk/debug/app-debug.apk`
 
 ## Pleos 연동
 
+### 숨겨진 개발자 화면
+
+앱 상단의 `Pichle` 글자를 **4초 안에 7번** 누르면 진입합니다. 일반 주문 흐름의 매장·장바구니 상태는 유지합니다.
+
+- **위치:** Pleos FusedLocation 1.1.3으로 다음 위치 1회 수신, 캐시된 마지막 위치 조회, 연속 수신·중지. 최초 요청 시 `FUSED_LOCATION` 런타임 권한 요청
+- **주행 정보:** Vehicle State GET 39개 항목의 개별·전체 순차 조회와 중지. API 이름, 필요 권한, 단위, 원시 자료형·값, 응답시간, 미지원·권한 오류·시간 초과 표시
+- **결과 로그:** 최근 80개 이벤트와 JSON 복사. 위치/주행 결과는 앱 서버로 보내지 않음
+
+위치의 altitude·heading·confidence는 SDK 원시값이며, confidence를 미터 정확도로 취급하지 않습니다. 크루즈 설정 속도와 타이어 저압 임계값도 실제 차량 속도·실측 타이어 압력과 구분해 표시합니다. 개발자 화면을 나가면 위치 구독과 대기 중 조회를 중지합니다. 개발자 화면 자체에서는 차량 제어를 호출하지 않습니다.
+
+### 주문·차량 기능
+
 - NaviHelper 3.0.5: `initialize` → 리스너 등록 → `requestRoute` → `requestNavigationScreen(Foreground)`; 완료·오류 콜백으로 결과 확인
 - TextToSpeech 3.3.1: `Mode.ON_DEVICE`로 초기화해 별도 서버 인증 없이 차량 음성 출력을 요청. 실패하면 Android 한국어 TTS로 전환. 두 경로 모두 재생 시작·완료·실패를 화면에 표시
+- 음성 재생 시 공개 AudioManager API로 출력 스트림을 가능한 최대 음량으로 설정하고 완료·중지 후 기존 음량을 복원합니다. 사용자가 음량을 변경했다면 덮어쓰지 않습니다. 차량의 고정 음량·전용 볼륨 그룹 정책은 따릅니다.
 - Vehicle 2.3.2: 창문 위치 Capability에서 운전석(`ROW_1_LEFT`)의 쓰기 지원 및 최댓값을 확인한 후 `setWindowPosition` 호출. 같은 연결로 현재 위치를 최대 8초 재조회하며 최댓값 도달 시에만 내림 완료 표시
 
 Pleos Connect 2.1.0 에뮬레이터에서는 음성 시작·완료와 실제 목적지 경로 안내를 확인했습니다. 창문은 네이티브 VHAL까지 쓰기 요청이 전달되고 성공 응답을 받았으나 현재 위치가 계속 0으로 조회되었습니다. 이 경우 앱은 완료로 표시하지 않고 위치 변경 미확인을 안내합니다. 실차 동작은 검증하지 않았습니다.
 
-필요 권한: `TTS_SERVICE`, `NAVI_ROUTE_SEARCH`, `NAVI_CUSTOM_MAP`, `CAR_WINDOWS`, `CONTROL_CAR_WINDOWS` (모두 `pleos.car.permission.*`). 권한의 실제 허용과 차량별 지원 범위는 실행 플랫폼에 따릅니다. 창문 제어는 사용자가 버튼을 누를 때만 호출합니다.
+필요 권한: `TTS_SERVICE`, `NAVI_ROUTE_SEARCH`, `NAVI_CUSTOM_MAP`, `CAR_WINDOWS`, `CONTROL_CAR_WINDOWS` (모두 `pleos.car.permission.*`). 개발자 화면은 `FUSED_LOCATION`, `CAR_DRIVE`, `CAR_ENERGY`, `CAR_SAFETY`, `CAR_LIGHTS`를 추가로 사용합니다. 권한의 실제 허용과 차량별 지원 범위는 실행 플랫폼에 따릅니다. 창문 제어는 사용자가 버튼을 누를 때만 호출합니다.
 
 API 문서: [NaviHelper 목적지](https://document.pleos.ai/en/docs/pleos-only/connect-sdk-pleos/NaviHelper/destinations), [Pleos TTS](https://document.pleos.ai/en/docs/pleos-only/connect-sdk-pleos/TextToSpeech/intro), [창문 위치 제어](https://document.pleos.ai/docs/pleos-only/connect-sdk-pleos/Vehicle/vehicle/ai.pleos.playground.vehicle.api/window/set-window-position).
 

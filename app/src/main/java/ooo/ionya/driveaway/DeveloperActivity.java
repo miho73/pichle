@@ -49,6 +49,7 @@ public final class DeveloperActivity extends AppCompatActivity {
 
     @Override public void onCreate(Bundle state) {
         super.onCreate(state);
+        AppTaskIcon.apply(this);
         background = getColor(R.color.pichle_background); surface = getColor(R.color.pichle_surface);
         ink = getColor(R.color.pichle_text); muted = getColor(R.color.pichle_text_secondary);
         primary = getColor(R.color.pichle_primary); onPrimary = getColor(R.color.pichle_on_primary);
