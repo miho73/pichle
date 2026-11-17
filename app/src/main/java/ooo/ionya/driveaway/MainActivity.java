@@ -2,12 +2,14 @@ package ooo.ionya.driveaway;
 
 import android.app.AlertDialog;
 import android.content.Intent;
+import android.content.Context;
 import android.graphics.Color;
 import android.graphics.Typeface;
 import android.graphics.drawable.GradientDrawable;
 import android.os.Bundle;
 import android.view.Gravity;
 import android.view.View;
+import android.view.inputmethod.InputMethodManager;
 import android.widget.Button;
 import android.widget.EditText;
 import android.widget.GridLayout;
@@ -40,6 +42,9 @@ public class MainActivity extends AppCompatActivity {
     private OrderSpeechController speech;
     private PleosNavigation navigation;
     private PleosWindowController windows;
+    private CarUxGate uxGate;
+    private CarUxGate.State uxState;
+    private AlertDialog storeChangeDialog;
     private LinearLayout content, footer;
     private TextView voiceStatusView, navigationStatusView, windowStatusView;
     private Button speechPlay, speechStop;
@@ -48,7 +53,7 @@ public class MainActivity extends AppCompatActivity {
     private int draftQuantity = 1;
     private String draftNote = "", category = "전체", method = "";
     private String voiceStatus = "음성 준비 중", navigationStatus = "", windowStatus = "";
-    private boolean arrived, voiceDelivered, submitting, destroyed;
+    private boolean arrived, voiceDelivered, submitting, destroyed, foreground;
     private int developerTapCount;
     private long developerTapStarted;
 
@@ -76,13 +81,15 @@ public class MainActivity extends AppCompatActivity {
         navigation = new PleosNavigation(this, status -> runOnUiThread(() -> {
             if (destroyed) return;
             navigationStatus = status;
-            if (navigationStatusView != null) navigationStatusView.setText(status);
+            if (navigationStatusView != null) navigationStatusView.setText(uxText(status));
         }));
         windows = new PleosWindowController(this, status -> runOnUiThread(() -> {
             if (destroyed) return;
             windowStatus = status;
-            if (windowStatusView != null) windowStatusView.setText(status);
+            if (windowStatusView != null) windowStatusView.setText(uxText(status));
         }));
+        uxGate = new CarUxGate(this, this::onUxChanged);
+        uxState = uxGate.getState();
         getOnBackPressedDispatcher().addCallback(this, new OnBackPressedCallback(true) {
             @Override public void handleOnBackPressed() { goBack(); }
         });
@@ -97,6 +104,7 @@ public class MainActivity extends AppCompatActivity {
     }
 
     private void render() {
+        if (reducedUi()) { showDrivingUi(); return; }
         if (screen != OrderFlow.STORES && selected == null) screen = OrderFlow.STORES;
         switch (screen) {
             case MENU: showMenu(); break;
@@ -109,6 +117,96 @@ public class MainActivity extends AppCompatActivity {
             case PICKUP: showPickup(); break;
             default: showStores();
         }
+    }
+
+    private boolean reducedUi() {
+        return uxState != null && !uxState.canUseComplexUi();
+    }
+
+    private boolean canEditOrder() {
+        return foreground && !destroyed && !reducedUi();
+    }
+
+    private String uxText(String value) {
+        return uxState != null && uxState.connected ? uxState.limitText(value) : value;
+    }
+
+    private boolean drivingContentAllowed(int items) {
+        return foreground && !destroyed && uxState != null && uxState.connected
+                && uxState.contentAllowed() && (!uxState.limitsContent()
+                || (uxState.maxDepth >= 1 && uxState.maxItems >= items));
+    }
+
+    private boolean preparedVoiceAllowed() {
+        return selected != null && !cart.isEmpty() && "voice".equals(method)
+                && drivingContentAllowed(2);
+    }
+
+    private void onUxChanged(CarUxGate.State next) {
+        if (destroyed) return;
+        saveDraftNote();
+        uxState = next;
+        if (reducedUi()) {
+            developerTapCount = 0;
+            View focused = getCurrentFocus();
+            if (focused != null) {
+                InputMethodManager input = (InputMethodManager) getSystemService(Context.INPUT_METHOD_SERVICE);
+                if (input != null) input.hideSoftInputFromWindow(focused.getWindowToken(), 0);
+                focused.clearFocus();
+            }
+            if (storeChangeDialog != null) { storeChangeDialog.dismiss(); storeChangeDialog = null; }
+            if (!preparedVoiceAllowed() && speech != null) speech.stop();
+        }
+        if (foreground) render();
+    }
+
+    /** One fixed view: no menus, text entry, order transcript, or further view traversal. */
+    private void showDrivingUi() {
+        page("이동 · 음성", "메뉴 선택과 주문 변경은 주차 후 이용해주세요.");
+        if (uxState == null || !uxState.connected) {
+            addText(content, "차량 상태 확인 중", 26, INK, true, 8);
+            addText(content, "연결이 확인되면 사용할 수 있습니다.", 18, MUTED, false, 14);
+            return;
+        }
+        if (!drivingContentAllowed(1)) {
+            addText(content, "주차 후 이용해주세요", 26, INK, true, 8);
+            return;
+        }
+        if (selected == null) {
+            addText(content, "선택한 매장이 없습니다", 26, INK, true, 8);
+            return;
+        }
+        LinearLayout destination = card();
+        TextView name = text(selected.name, 26, INK, true);
+        name.setMaxLines(1); destination.addView(name);
+        LinearLayout controls = row();
+        Button navigate = button("길안내", true, () -> {
+            if (!drivingContentAllowed(1) || selected == null) { render(); return; }
+            navigation.navigate(selected.latitude, selected.longitude, selected.name, selected.address);
+        });
+        controls.addView(navigate, new LinearLayout.LayoutParams(0, dp(68), 1));
+        if (preparedVoiceAllowed()) {
+            speechPlay = button("주문 읽기", true, this::playOrderSpeech);
+            speechStop = button("중지", false, () -> speech.stop());
+            LinearLayout.LayoutParams play = new LinearLayout.LayoutParams(0, dp(68), 1);
+            play.setMarginStart(dp(12)); controls.addView(speechPlay, play);
+            LinearLayout.LayoutParams stop = new LinearLayout.LayoutParams(0, dp(68), 1);
+            stop.setMarginStart(dp(12)); controls.addView(speechStop, stop);
+        }
+        add(destination, controls, 18, -2);
+        navigationStatusView = text(navigationStatus, 17, MUTED, false);
+        navigationStatusView.setMaxLines(1); add(destination, navigationStatusView, 10, -2);
+        if (speechPlay != null) {
+            voiceStatusView = text(voiceStatus, 17, MUTED, false);
+            voiceStatusView.setMaxLines(1); add(destination, voiceStatusView, 8, -2);
+        }
+        content.addView(destination);
+        updateSpeechViews();
+    }
+
+    private void playOrderSpeech() {
+        if (!foreground || destroyed || (reducedUi() && !preparedVoiceAllowed())) return;
+        speech.speak(orderText());
     }
 
     private void page(String title, String subtitle) {
@@ -125,18 +223,18 @@ public class MainActivity extends AppCompatActivity {
         LinearLayout appbar = row();
         appbar.setBackgroundColor(SURFACE);
         appbar.setPadding(dp(24), dp(8), dp(24), dp(8));
-        if (screen != OrderFlow.STORES) {
-            Button back = button("‹ 뒤로", false, this::goBack);
+        if (screen != OrderFlow.STORES || reducedUi()) {
+            Button back = button(reducedUi() ? "닫기" : "‹ 뒤로", false, this::goBack);
             back.setBackgroundColor(Color.TRANSPARENT);
             appbar.addView(back, params(dp(104), dp(52)));
         }
         TextView brand = text("Pichle", 23, INK, true);
         brand.setGravity(Gravity.CENTER_VERTICAL);
-        brand.setOnClickListener(view -> openDeveloperMode());
+        if (!reducedUi()) brand.setOnClickListener(view -> openDeveloperMode());
         LinearLayout.LayoutParams brandLp = new LinearLayout.LayoutParams(0, dp(52), 1);
         brandLp.setMarginStart(screen == OrderFlow.STORES ? 0 : dp(18));
         appbar.addView(brand, brandLp);
-        if (selected != null && screen == OrderFlow.STORES && !cart.isEmpty()) {
+        if (!reducedUi() && selected != null && screen == OrderFlow.STORES && !cart.isEmpty()) {
             Button resume = button(receipt == null ? "장바구니 " + count() : "접수 내역", false,
                     () -> go(receipt == null ? OrderFlow.REVIEW : OrderFlow.SEND));
             appbar.addView(resume, params(dp(160), dp(52)));
@@ -148,12 +246,16 @@ public class MainActivity extends AppCompatActivity {
         heading.addView(text(title, 30, INK, true));
         if (subtitle != null && !subtitle.isEmpty()) addText(heading, subtitle, 16, MUTED, false, 8);
         root.addView(heading, params(-1, -2));
-        ScrollView scroll = new ScrollView(this);
-        scroll.setFillViewport(false);
-        scroll.setClipToPadding(false);
         content = column(); content.setPadding(dp(28), 0, dp(28), dp(24));
-        scroll.addView(content, new ScrollView.LayoutParams(-1, -2));
-        root.addView(scroll, new LinearLayout.LayoutParams(-1, 0, 1));
+        if (reducedUi()) {
+            root.addView(content, new LinearLayout.LayoutParams(-1, 0, 1));
+        } else {
+            ScrollView scroll = new ScrollView(this);
+            scroll.setFillViewport(false);
+            scroll.setClipToPadding(false);
+            scroll.addView(content, new ScrollView.LayoutParams(-1, -2));
+            root.addView(scroll, new LinearLayout.LayoutParams(-1, 0, 1));
+        }
         footer = column(); footer.setBackgroundColor(SURFACE);
         footer.setPadding(dp(24), dp(14), dp(24), dp(18));
         footer.setVisibility(View.GONE);
@@ -211,6 +313,7 @@ public class MainActivity extends AppCompatActivity {
     }
 
     private void openDeveloperMode() {
+        if (!canEditOrder()) { developerTapCount = 0; return; }
         long now = android.os.SystemClock.elapsedRealtime();
         if (now - developerTapStarted > 4000) { developerTapCount = 0; developerTapStarted = now; }
         if (++developerTapCount < 7) return;
@@ -230,8 +333,9 @@ public class MainActivity extends AppCompatActivity {
     }
 
     private void chooseStore(PichleApi.StoreSummary store) {
+        if (!canEditOrder()) return;
         if (selected != null && !selected.id.equals(store.id) && !cart.isEmpty()) {
-            new AlertDialog.Builder(this).setTitle("매장을 변경할까요?")
+            storeChangeDialog = new AlertDialog.Builder(this).setTitle("매장을 변경할까요?")
                     .setMessage("현재 장바구니의 메뉴가 삭제됩니다.")
                     .setNegativeButton("취소", null)
                     .setPositiveButton("변경", (dialog, which) -> selectStore(store)).show();
@@ -239,6 +343,7 @@ public class MainActivity extends AppCompatActivity {
     }
 
     private void selectStore(PichleApi.StoreSummary store) {
+        if (!canEditOrder()) return;
         if (selected == null || !selected.id.equals(store.id)) {
             cart.clear(); receipt = null; method = ""; arrived = false; voiceDelivered = false;
             navigationStatus = ""; windowStatus = "";
@@ -278,6 +383,7 @@ public class MainActivity extends AppCompatActivity {
             String choice = raw.trim(); if (choice.isEmpty()) continue;
             Button option = button((draftOptions.contains(choice) ? "✓  " : "") + choice, draftOptions.contains(choice), () -> { });
             option.setOnClickListener(view -> {
+                if (!canEditOrder()) return;
                 if (!draftOptions.remove(choice)) draftOptions.add(choice);
                 option.setText((draftOptions.contains(choice) ? "✓  " : "") + choice);
                 styleButton(option, draftOptions.contains(choice));
@@ -296,8 +402,8 @@ public class MainActivity extends AppCompatActivity {
         quantityRow.addView(less, params(dp(64), dp(56)));
         quantityRow.addView(value, params(dp(72), dp(56)));
         quantityRow.addView(more, params(dp(64), dp(56)));
-        less.setOnClickListener(view -> { if (draftQuantity > 1) draftQuantity--; value.setText(String.valueOf(draftQuantity)); updateAddFooter(); });
-        more.setOnClickListener(view -> { if (draftQuantity < 20) draftQuantity++; value.setText(String.valueOf(draftQuantity)); updateAddFooter(); });
+        less.setOnClickListener(view -> { if (!canEditOrder()) return; if (draftQuantity > 1) draftQuantity--; value.setText(String.valueOf(draftQuantity)); updateAddFooter(); });
+        more.setOnClickListener(view -> { if (!canEditOrder()) return; if (draftQuantity < 20) draftQuantity++; value.setText(String.valueOf(draftQuantity)); updateAddFooter(); });
         quantity.addView(quantityRow); add(content, quantity, 14, -2);
         LinearLayout note = card(); note.addView(text("요청사항", 21, INK, true));
         optionNote = new EditText(this); optionNote.setText(draftNote); optionNote.setTextSize(18);
@@ -388,10 +494,12 @@ public class MainActivity extends AppCompatActivity {
     }
 
     private void submitOrder() {
-        if (submitting || receipt != null || cart.isEmpty() || !selected.electronicOrdering) return;
+        if (!canEditOrder() || submitting || receipt != null || cart.isEmpty()
+                || selected == null || !selected.electronicOrdering) return;
         submitting = true; render();
         new android.os.Handler(getMainLooper()).post(() -> {
             if (destroyed) return;
+            if (!canEditOrder()) { submitting = false; if (foreground) render(); return; }
             try {
                 ArrayList<String> ids = new ArrayList<>();
                 for (CartItem item : cart) for (int i = 0; i < item.quantity; i++) ids.add(item.id);
@@ -409,7 +517,7 @@ public class MainActivity extends AppCompatActivity {
         player.addView(text("주문 읽어주기", 28, INK, true));
         voiceStatusView = text(voiceStatus, 18, MUTED, false); add(player, voiceStatusView, 10, -2);
         LinearLayout controls = row();
-        speechPlay = button("▶  주문 음성 재생", true, () -> speech.speak(orderText()));
+        speechPlay = button("▶  주문 음성 재생", true, this::playOrderSpeech);
         speechStop = button("■  중지", false, () -> speech.stop());
         LinearLayout.LayoutParams playLp = new LinearLayout.LayoutParams(0, dp(80), 3); playLp.setMarginEnd(dp(12));
         controls.addView(speechPlay, playLp); controls.addView(speechStop, new LinearLayout.LayoutParams(0, dp(80), 1));
@@ -427,11 +535,13 @@ public class MainActivity extends AppCompatActivity {
     }
 
     private void updateSpeechViews() {
-        if (voiceStatusView != null) voiceStatusView.setText(voiceStatus);
+        if (voiceStatusView != null) voiceStatusView.setText(uxText(voiceStatus));
         boolean busy = speech != null && speech.isBusy();
         if (speechPlay != null) {
-            speechPlay.setText(busy ? "음성 재생 중…" : "▶  주문 음성 재생");
-            speechPlay.setEnabled(!busy); speechPlay.setAlpha(busy ? 0.6f : 1f);
+            speechPlay.setText(uxText(reducedUi() ? (busy ? "재생 중" : "주문 읽기")
+                    : (busy ? "음성 재생 중…" : "▶  주문 음성 재생")));
+            boolean enabled = !busy && foreground && (!reducedUi() || preparedVoiceAllowed());
+            speechPlay.setEnabled(enabled); speechPlay.setAlpha(enabled ? 1f : 0.6f);
         }
         if (speechStop != null) { speechStop.setEnabled(busy); speechStop.setAlpha(busy ? 1f : 0.4f); }
     }
@@ -482,6 +592,7 @@ public class MainActivity extends AppCompatActivity {
     }
 
     private void goBack() {
+        if (reducedUi()) { moveTaskToBack(true); return; }
         switch (screen) {
             case MENU: go(OrderFlow.STORES); break;
             case OPTIONS: go(OrderFlow.MENU); break;
@@ -548,9 +659,14 @@ public class MainActivity extends AppCompatActivity {
         GradientDrawable background = fill(SURFACE, 4); background.setStroke(dp(1), LINE); c.setBackground(background); return c;
     }
     private Button button(String label, boolean primary, Runnable action) {
-        Button b = new Button(this); b.setText(label); b.setTextSize(18); b.setAllCaps(false); b.setTypeface(null, Typeface.BOLD);
+        boolean requiresParkedUi = !reducedUi();
+        Button b = new Button(this); b.setText(uxText(label)); b.setTextSize(18); b.setAllCaps(false); b.setTypeface(null, Typeface.BOLD);
         b.setPadding(dp(14), dp(6), dp(14), dp(6)); b.setMinWidth(0); b.setMinimumWidth(0); b.setElevation(0);
-        styleButton(b, primary); b.setOnClickListener(view -> action.run()); return b;
+        styleButton(b, primary); b.setOnClickListener(view -> {
+            if (!foreground || destroyed) return;
+            if (requiresParkedUi && !canEditOrder()) { render(); return; }
+            action.run();
+        }); return b;
     }
     private void styleButton(Button b, boolean primary) {
         b.setBackgroundTintList(null);
@@ -559,7 +675,7 @@ public class MainActivity extends AppCompatActivity {
         b.setBackground(background); b.setTextColor(primary ? ON_PRIMARY : INK);
     }
     private TextView text(String label, int size, int color, boolean bold) {
-        TextView v = new TextView(this); v.setText(label); v.setTextSize(size); v.setTextColor(color);
+        TextView v = new TextView(this); v.setText(uxText(label)); v.setTextSize(size); v.setTextColor(color);
         v.setIncludeFontPadding(false); if (bold) v.setTypeface(null, Typeface.BOLD); return v;
     }
     private TextView addText(LinearLayout parent, String label, int size, int color, boolean bold, int margin) {
@@ -610,8 +726,24 @@ public class MainActivity extends AppCompatActivity {
         super.onSaveInstanceState(state);
     }
 
+    @Override protected void onStart() {
+        super.onStart();
+        foreground = true;
+        if (uxGate != null) uxGate.start();
+    }
+
+    @Override protected void onStop() {
+        saveDraftNote();
+        foreground = false;
+        if (speech != null) speech.stop();
+        if (storeChangeDialog != null) { storeChangeDialog.dismiss(); storeChangeDialog = null; }
+        if (uxGate != null) uxGate.stop();
+        super.onStop();
+    }
+
     @Override protected void onDestroy() {
         destroyed = true;
+        if (uxGate != null) uxGate.close();
         if (speech != null) speech.close();
         if (navigation != null) navigation.close();
         if (windows != null) windows.close();

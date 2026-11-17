@@ -4,6 +4,7 @@ plugins {
 
 android {
     namespace = "ooo.ionya.driveaway"
+    useLibrary("android.car", false)
     compileSdk {
         version = release(37)
     }

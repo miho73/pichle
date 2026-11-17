@@ -6,6 +6,7 @@ import android.content.pm.PackageManager;
 import android.graphics.Typeface;
 import android.graphics.drawable.GradientDrawable;
 import android.os.Bundle;
+import android.os.Handler;
 import android.view.Gravity;
 import android.view.View;
 import android.widget.AdapterView;
@@ -45,7 +46,9 @@ public final class DeveloperActivity extends AppCompatActivity {
     private final ArrayDeque<JSONObject> events = new ArrayDeque<>();
     private ActivityResultLauncher<String[]> permissionRequest;
     private Runnable pendingLocationAction;
-    private boolean destroyed;
+    private CarUxGate uxGate;
+    private CarUxGate.State uxState;
+    private boolean destroyed, foreground;
 
     @Override public void onCreate(Bundle state) {
         super.onCreate(state);
@@ -57,6 +60,7 @@ public final class DeveloperActivity extends AppCompatActivity {
         restore(state);
         permissionRequest = registerForActivityResult(new ActivityResultContracts.RequestMultiplePermissions(), grants -> {
             Runnable action = pendingLocationAction; pendingLocationAction = null;
+            if (!canUseDiagnostics()) return;
             boolean allowed = true;
             for (String permission : FusedLocationProbe.requiredPermissions())
                 allowed &= checkSelfPermission(permission) == PackageManager.PERMISSION_GRANTED;
@@ -68,19 +72,27 @@ public final class DeveloperActivity extends AppCompatActivity {
             }
         });
         location = new FusedLocationProbe(this, (title, detail) -> runOnUiThread(() -> {
-            if (destroyed) return;
+            if (destroyed || !canUseDiagnostics()) return;
             locationResult = title + "\n" + detail;
             if (locationView != null) locationView.setText(locationResult);
             record("FusedLocation", title, "RESULT", detail);
         }));
         vehicle = new VehicleStateProbe(this, (id, status, value) -> runOnUiThread(() -> {
-            if (destroyed) return;
+            if (destroyed || !canUseDiagnostics()) return;
             Result result = new Result(status, value, System.currentTimeMillis());
             results.put(id, result);
             TextView view = resultViews.get(id);
             if (view != null) view.setText(result.describe());
             record("Vehicle", id, status, value);
         }));
+        Handler main = new Handler(getMainLooper());
+        uxGate = new CarUxGate(this, stateNow -> main.post(() -> {
+            if (destroyed) return;
+            uxState = stateNow;
+            if (!canUseDiagnostics()) suspendDiagnostics();
+            render();
+        }));
+        uxState = uxGate.getState();
         render();
     }
 
@@ -94,10 +106,19 @@ public final class DeveloperActivity extends AppCompatActivity {
         setContentView(root);
         LinearLayout header = row(); header.setPadding(dp(24), dp(12), dp(24), dp(12)); header.setBackgroundColor(surface);
         header.addView(text("개발자 모드", 26, ink, true), new LinearLayout.LayoutParams(0, -2, 1));
-        header.addView(button("JSON 복사", false, this::copyResults), params(dp(144), dp(52)));
+        if (canUseDiagnostics()) header.addView(button("JSON 복사", false, this::copyResults), params(dp(144), dp(52)));
         Button close = button("닫기", false, this::finish);
+        close.setOnClickListener(view -> finish());
         LinearLayout.LayoutParams closeLp = params(dp(96), dp(52)); closeLp.setMarginStart(dp(12)); header.addView(close, closeLp);
         root.addView(header, params(-1, -2));
+        if (!canUseDiagnostics()) {
+            LinearLayout message = column();
+            message.setPadding(dp(28), dp(32), dp(28), dp(28));
+            message.addView(text("주차 후 이용해주세요", 28, ink, true));
+            add(message, text("개발자 모드는 주차 중에만 사용할 수 있습니다.", 19, muted, false), 14);
+            root.addView(message, params(-1, -2));
+            return;
+        }
         LinearLayout tabs = row(); tabs.setPadding(dp(24), dp(16), dp(24), dp(16));
         for (String name : new String[]{"위치", "주행 정보", "결과 로그"}) {
             Button select = button(name, name.equals(tab), () -> { tab = name; render(); });
@@ -133,7 +154,7 @@ public final class DeveloperActivity extends AppCompatActivity {
     }
 
     private void withLocationPermission(Runnable action) {
-        if (pendingLocationAction != null) return;
+        if (!canUseDiagnostics() || pendingLocationAction != null) return;
         ArrayList<String> missing = new ArrayList<>();
         for (String permission : FusedLocationProbe.requiredPermissions())
             if (checkSelfPermission(permission) != PackageManager.PERMISSION_GRANTED) missing.add(permission);
@@ -163,6 +184,7 @@ public final class DeveloperActivity extends AppCompatActivity {
         picker.setSelection(Math.max(0, domains.indexOf(domain)));
         picker.setOnItemSelectedListener(new AdapterView.OnItemSelectedListener() {
             @Override public void onItemSelected(AdapterView<?> parent, View view, int position, long id) {
+                if (!canUseDiagnostics()) return;
                 String next = domains.get(position);
                 if (!next.equals(domain)) { domain = next; render(); }
             }
@@ -197,7 +219,7 @@ public final class DeveloperActivity extends AppCompatActivity {
     }
 
     private void record(String source, String api, String status, String value) {
-        if (destroyed) return;
+        if (destroyed || !canUseDiagnostics()) return;
         try {
             JSONObject event = new JSONObject();
             event.put("timeMillis", System.currentTimeMillis()); event.put("source", source);
@@ -236,6 +258,7 @@ public final class DeveloperActivity extends AppCompatActivity {
     }
 
     private void copyResults() {
+        if (!canUseDiagnostics()) return;
         try {
             ClipboardManager clipboard = (ClipboardManager) getSystemService(CLIPBOARD_SERVICE);
             if (clipboard != null) {
@@ -274,14 +297,40 @@ public final class DeveloperActivity extends AppCompatActivity {
         super.onSaveInstanceState(state);
     }
 
-    @Override protected void onStop() {
+    private boolean canUseDiagnostics() {
+        CarUxGate.State current = uxGate == null ? uxState : uxGate.getState();
+        return foreground && current != null && current.canUseComplexUi();
+    }
+
+    private void suspendDiagnostics() {
+        pendingLocationAction = null;
         if (location != null) location.stopUpdates();
         if (vehicle != null) vehicle.stopAll();
+        long now = System.currentTimeMillis();
+        for (Map.Entry<String, Result> entry : results.entrySet()) {
+            if (entry.getValue().status.equals("RUNNING")) {
+                entry.setValue(new Result("CANCELLED", "차량 상태 변경으로 조회를 중지했습니다.", now));
+            }
+        }
+    }
+
+    @Override protected void onStart() {
+        super.onStart();
+        foreground = true;
+        if (uxGate != null) { uxGate.start(); uxState = uxGate.getState(); }
+        render();
+    }
+
+    @Override protected void onStop() {
+        foreground = false;
+        suspendDiagnostics();
+        if (uxGate != null) uxGate.stop();
         super.onStop();
     }
 
     @Override protected void onDestroy() {
         destroyed = true;
+        if (uxGate != null) uxGate.close();
         if (location != null) location.close();
         if (vehicle != null) vehicle.close();
         super.onDestroy();
@@ -305,7 +354,7 @@ public final class DeveloperActivity extends AppCompatActivity {
         Button b = new Button(this); b.setText(value); b.setTextSize(17); b.setAllCaps(false);
         b.setTextColor(selected ? onPrimary : ink); b.setBackgroundTintList(null);
         GradientDrawable bg = fill(selected ? primary : surface); if (!selected) bg.setStroke(dp(1), divider);
-        b.setBackground(bg); b.setOnClickListener(view -> action.run()); return b;
+        b.setBackground(bg); b.setOnClickListener(view -> { if (canUseDiagnostics()) action.run(); }); return b;
     }
     private GradientDrawable fill(int color) { GradientDrawable bg = new GradientDrawable(); bg.setColor(color); bg.setCornerRadius(dp(3)); return bg; }
     private void weighted(LinearLayout parent, View child) {
