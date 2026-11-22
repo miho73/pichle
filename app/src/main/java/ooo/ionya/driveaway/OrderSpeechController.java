@@ -21,6 +21,8 @@ import java.util.Locale;
 /** Plays order text through Pleos Speech Service, with Android TTS as a compatibility fallback. */
 public final class OrderSpeechController implements AutoCloseable {
     public interface Listener { void onStatus(String message); }
+    /** Called once a requested playback ends: finished, failed or stopped. Main thread. */
+    public interface FinishListener { void onFinished(boolean completed); }
     private enum Engine { STARTING_PLEOS, PLEOS, STARTING_ANDROID, ANDROID, FAILED, CLOSED }
 
     private final Context context;
@@ -40,6 +42,15 @@ public final class OrderSpeechController implements AutoCloseable {
     private boolean playbackStarted;
     private int volumeStream = -1, previousVolume = -1, requestedVolume = -1;
     private String volumeNotice = "";
+    private FinishListener finishListener;
+    private final Runnable volumeLock = new Runnable() {
+        @Override public void run() {
+            if (audio == null || volumeStream < 0 || engine == Engine.CLOSED) return;
+            try { if (audio.getStreamVolume(volumeStream) != requestedVolume) audio.setStreamVolume(volumeStream, requestedVolume, 0); }
+            catch (RuntimeException ignored) { }
+            main.postDelayed(this, 250);
+        }
+    };
 
     private final EventListener pleosEvents = new EventListener() {
         @Override public void onReady() { }
@@ -219,6 +230,7 @@ public final class OrderSpeechController implements AutoCloseable {
         restoreSpeechVolume();
         abandonFocus();
         status("주문 읽기를 마쳤습니다.");
+        notifyFinished(true);
     }
 
     private void failed(String message) {
@@ -232,6 +244,13 @@ public final class OrderSpeechController implements AutoCloseable {
         restoreSpeechVolume();
         abandonFocus();
         status(message);
+        notifyFinished(false);
+    }
+
+    public void setFinishListener(FinishListener finishListener) { this.finishListener = finishListener; }
+
+    private void notifyFinished(boolean completed) {
+        if (finishListener != null) finishListener.onFinished(completed);
     }
 
     public boolean isBusy() { return activeText != null || pendingText != null; }
@@ -248,7 +267,7 @@ public final class OrderSpeechController implements AutoCloseable {
         if (androidTts != null) androidTts.stop();
         restoreSpeechVolume();
         abandonFocus();
-        if (hadRequest) status("주문 읽기를 중지했습니다.");
+        if (hadRequest) { status("주문 읽기를 중지했습니다."); notifyFinished(false); }
     }
 
     /** Change volume only for an explicit playback request, never while preparing the engine. */
@@ -270,17 +289,20 @@ public final class OrderSpeechController implements AutoCloseable {
             audio.setStreamVolume(stream, maximum, 0);
             if (audio.getStreamVolume(stream) != maximum)
                 volumeNotice = "차량 설정에서 음량을 조절해주세요.";
+            // Keep it at maximum for the whole playback, even if something lowers it.
+            main.removeCallbacks(volumeLock);
+            main.postDelayed(volumeLock, 250);
         } catch (RuntimeException error) {
             volumeNotice = "차량 설정에서 음량을 조절해주세요.";
         }
     }
 
     private void restoreSpeechVolume() {
+        main.removeCallbacks(volumeLock);
         if (audio == null || volumeStream < 0) return;
         try {
-            // A changed value belongs to the user or the platform; leave that choice in place.
-            if (previousVolume >= 0 && audio.getStreamVolume(volumeStream) == requestedVolume)
-                audio.setStreamVolume(volumeStream, previousVolume, 0);
+            // The volume was held at maximum during playback, so put the original value back.
+            if (previousVolume >= 0) audio.setStreamVolume(volumeStream, previousVolume, 0);
         } catch (RuntimeException ignored) {
             volumeNotice = "기존 음량은 차량 설정에서 조절해주세요.";
         } finally {

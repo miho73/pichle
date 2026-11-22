@@ -3,6 +3,7 @@ package ooo.ionya.driveaway;
 import android.app.AlertDialog;
 import android.content.Intent;
 import android.content.Context;
+import android.content.pm.PackageManager;
 import android.graphics.Color;
 import android.graphics.Typeface;
 import android.graphics.drawable.GradientDrawable;
@@ -15,9 +16,12 @@ import android.widget.EditText;
 import android.widget.GridLayout;
 import android.widget.LinearLayout;
 import android.widget.ScrollView;
+import android.widget.Switch;
 import android.widget.TextView;
 import android.widget.Toast;
 import androidx.activity.OnBackPressedCallback;
+import androidx.activity.result.ActivityResultLauncher;
+import androidx.activity.result.contract.ActivityResultContracts;
 import androidx.appcompat.app.AppCompatActivity;
 import androidx.core.view.ViewCompat;
 import androidx.core.view.WindowInsetsCompat;
@@ -38,6 +42,21 @@ public class MainActivity extends AppCompatActivity {
     private OrderFlow screen = OrderFlow.STORES;
     private PichleApi.StoreSummary selected;
     private PichleApi.MenuItem draftMenu;
+    private NearbyFinder nearby;
+    private final List<PichleApi.StoreSummary> nearbyStores = new ArrayList<>();
+    private String searchDraft = "", searchQuery = "";
+    private boolean searching;
+    private boolean orderWindowOpen, orderWindowPending, pickupWindowOpen, pickupFinishing, pickupCloseFailed;
+    private final ImageLoader images = new ImageLoader();
+    private final BrandMenuFetcher brandMenus = new BrandMenuFetcher();
+    private final java.util.concurrent.ExecutorService menuWorker = java.util.concurrent.Executors.newSingleThreadExecutor();
+    private List<BrandMenuFetcher.Entry> placeMenu = Collections.emptyList();
+    private String placeMenuStatus = "", placeTab;
+    private int placeMenuRequest;
+    private ActivityResultLauncher<String[]> locationPermission;
+    private String nearbyArea, nearbyStatus = "";
+    private boolean dtOnly;
+    private boolean nearbyLoaded, locationAsked;
     private PichleApi.OrderReceipt receipt;
     private OrderSpeechController speech;
     private PleosNavigation navigation;
@@ -68,16 +87,48 @@ public class MainActivity extends AppCompatActivity {
         SURFACE = getColor(R.color.pichle_surface);
         ON_PRIMARY = getColor(R.color.pichle_on_primary);
         favorites.addAll(getPreferences(MODE_PRIVATE).getStringSet("favorites", Collections.emptySet()));
-        try {
-            stores.addAll(api.findNearbyStores("songdo"));
-            stores.sort((a, b) -> Integer.compare(a.driveMinutes + a.waitMinutes, b.driveMinutes + b.waitMinutes));
-        } catch (Exception error) { toast("매장 정보를 불러오지 못했습니다."); }
+        dtOnly = getPreferences(MODE_PRIVATE).getBoolean("dtOnly", false);
+        nearbyStatus = "현재 위치 주변 매장을 찾는 중입니다.";
         restoreState(state);
+        locationPermission = registerForActivityResult(new ActivityResultContracts.RequestMultiplePermissions(), grants -> {
+            if (destroyed) return;
+            if (checkSelfPermission(FusedLocationProbe.PERMISSION) == PackageManager.PERMISSION_GRANTED) startNearby();
+            else useSampleStores("위치 권한이 없어 샘플 매장을 표시합니다.");
+        });
+        nearby = new NearbyFinder(this, new NearbyFinder.Listener() {
+            @Override public void onStores(List<PichleApi.StoreSummary> found, String area) {
+                if (destroyed) return;
+                stores.clear(); stores.addAll(found);
+                nearbyStores.clear(); nearbyStores.addAll(found);
+                searchQuery = ""; searching = false;
+                nearbyArea = area; nearbyLoaded = true;
+                nearbyStatus = "네이버 지도 기준 · 가까운 순";
+                if (foreground) render();
+            }
+            @Override public void onSearch(String query, List<PichleApi.StoreSummary> found) {
+                if (destroyed) return;
+                searching = false; searchQuery = query;
+                stores.clear(); stores.addAll(found);
+                category = "전체";
+                if (foreground) render();
+            }
+            @Override public void onSearchError(String query, String message) {
+                if (destroyed) return;
+                searching = false;
+                toast(message);
+                if (foreground) render();
+            }
+            @Override public void onError(String message) {
+                if (destroyed) return;
+                useSampleStores(message + " 샘플 매장을 표시합니다.");
+            }
+        });
         speech = new OrderSpeechController(this, status -> runOnUiThread(() -> {
             if (destroyed) return;
             voiceStatus = status;
             updateSpeechViews();
         }));
+        speech.setFinishListener(completed -> { if (!destroyed) closeOrderWindow(); });
         navigation = new PleosNavigation(this, status -> runOnUiThread(() -> {
             if (destroyed) return;
             navigationStatus = status;
@@ -99,6 +150,7 @@ public class MainActivity extends AppCompatActivity {
     private void go(OrderFlow next) {
         saveDraftNote();
         if (screen == OrderFlow.VOICE && next != OrderFlow.VOICE && speech != null) speech.stop();
+        if (screen == OrderFlow.PICKUP && next != OrderFlow.PICKUP) closePickupWindowQuietly();
         screen = next;
         render();
     }
@@ -117,6 +169,50 @@ public class MainActivity extends AppCompatActivity {
             case PICKUP: showPickup(); break;
             default: showStores();
         }
+    }
+
+    private void runSearch() {
+        if (!canEditOrder() || nearby == null || searching) return;
+        String query = searchDraft.trim();
+        if (query.isEmpty()) return;
+        View focused = getCurrentFocus();
+        InputMethodManager input = (InputMethodManager) getSystemService(Context.INPUT_METHOD_SERVICE);
+        if (focused != null && input != null) input.hideSoftInputFromWindow(focused.getWindowToken(), 0);
+        searching = true;
+        render();
+        nearby.searchPlaces(query);
+    }
+
+    private void clearSearch() {
+        searchQuery = ""; searchDraft = ""; searching = false;
+        stores.clear(); stores.addAll(nearbyStores);
+        category = "전체";
+        render();
+    }
+
+    private void startNearby() {
+        if (nearbyLoaded || nearby == null || nearby.isBusy() || destroyed) return;
+        if (checkSelfPermission(FusedLocationProbe.PERMISSION) == PackageManager.PERMISSION_GRANTED) {
+            nearby.start();
+        } else if (!locationAsked && canEditOrder()) {
+            locationAsked = true;
+            try { locationPermission.launch(FusedLocationProbe.requiredPermissions()); }
+            catch (RuntimeException error) { useSampleStores("위치 권한을 요청하지 못해 샘플 매장을 표시합니다."); }
+        }
+    }
+
+    private void useSampleStores(String status) {
+        stores.clear();
+        try {
+            stores.addAll(api.findNearbyStores("songdo"));
+            stores.sort((a, b) -> Integer.compare(a.driveMinutes + a.waitMinutes, b.driveMinutes + b.waitMinutes));
+        } catch (Exception error) { toast("매장 정보를 불러오지 못했습니다."); }
+        nearbyArea = "송도동"; nearbyLoaded = true; nearbyStatus = status;
+        if (foreground) render();
+    }
+
+    private static boolean fromNaver(PichleApi.StoreSummary store) {
+        return store != null && store.id.startsWith(NearbyFinder.ID_PREFIX);
     }
 
     private boolean reducedUi() {
@@ -158,6 +254,7 @@ public class MainActivity extends AppCompatActivity {
             if (!preparedVoiceAllowed() && speech != null) speech.stop();
         }
         if (foreground) render();
+        if (foreground && !reducedUi()) startNearby();
     }
 
     /** One fixed view: no menus, text entry, order transcript, or further view traversal. */
@@ -206,7 +303,82 @@ public class MainActivity extends AppCompatActivity {
 
     private void playOrderSpeech() {
         if (!foreground || destroyed || (reducedUi() && !preparedVoiceAllowed())) return;
-        speech.speak(orderText());
+        if (speech.isBusy() || orderWindowPending) return;
+        // Never move a window while the car is restricted (driving); just read the order then.
+        if (reducedUi()) { speech.speak(orderText()); return; }
+        orderWindowPending = true;
+        windowStatus = "운전석 창문을 열고 있어요.";
+        updateSpeechViews();
+        windows.lowerDriverWindow((success, message) -> runOnUiThread(() -> {
+            orderWindowPending = false;
+            if (destroyed) return;
+            windowStatus = message;
+            // The open request was sent even if its confirmation timed out, so always try to close later.
+            orderWindowOpen = true;
+            if (windowStatusView != null) windowStatusView.setText(uxText(message));
+            // Speak even if the window could not be opened; the status line says why.
+            speech.speak(orderText());
+            if (!speech.isBusy()) closeOrderWindow();
+            updateSpeechViews();
+        }));
+    }
+
+    /** Closes the window that the order playback opened. Volume is restored by the speech controller. */
+    private void closeOrderWindow() {
+        if (!orderWindowOpen || destroyed) return;
+        orderWindowOpen = false;
+        windowStatus = "음성이 끝나 창문을 닫고 있어요.";
+        if (windowStatusView != null) windowStatusView.setText(uxText(windowStatus));
+        windows.raiseDriverWindow((success, message) -> runOnUiThread(() -> {
+            if (destroyed) return;
+            if (!success) orderWindowOpen = true;
+            windowStatus = success ? "운전석 창문을 닫았어요." : message + " 창문이 열려 있을 수 있어요.";
+            if (windowStatusView != null) windowStatusView.setText(uxText(windowStatus));
+            if (!success) toast("창문을 닫지 못했어요. 직접 확인해 주세요.");
+        }));
+    }
+
+    private void openPickupWindow() {
+        if (!canEditOrder() || pickupWindowOpen || pickupFinishing) return;
+        windowStatus = "운전석 창문을 열고 있어요.";
+        if (windowStatusView != null) windowStatusView.setText(uxText(windowStatus));
+        windows.lowerDriverWindow((success, message) -> runOnUiThread(() -> {
+            if (destroyed) return;
+            pickupWindowOpen = true; pickupCloseFailed = false;
+            windowStatus = message;
+            if (windowStatusView != null) windowStatusView.setText(uxText(message));
+        }));
+    }
+
+    private void completePickup() {
+        if (pickupFinishing) return;
+        Runnable done = () -> {
+            cart.clear(); receipt = null; method = ""; voiceDelivered = false; arrived = false;
+            toast("수령이 완료됐습니다."); go(OrderFlow.STORES);
+        };
+        if (!pickupWindowOpen) { done.run(); return; }
+        pickupFinishing = true;
+        windowStatus = "창문을 닫고 있어요.";
+        if (windowStatusView != null) windowStatusView.setText(uxText(windowStatus));
+        windows.raiseDriverWindow((success, message) -> runOnUiThread(() -> {
+            pickupFinishing = false;
+            if (destroyed) return;
+            if (success) { pickupWindowOpen = false; done.run(); return; }
+            if (pickupCloseFailed) { pickupWindowOpen = false; done.run(); return; }
+            pickupCloseFailed = true;
+            windowStatus = message + " 창문 상태를 확인하고, 그대로 끝내려면 수령 완료를 한 번 더 눌러 주세요.";
+            if (windowStatusView != null) windowStatusView.setText(uxText(windowStatus));
+        }));
+    }
+
+    /** Leaving the pickup screen another way (e.g. back) must not leave the window open. */
+    private void closePickupWindowQuietly() {
+        if (!pickupWindowOpen) return;
+        pickupWindowOpen = false;
+        windows.raiseDriverWindow((success, message) -> runOnUiThread(() -> {
+            if (destroyed) return;
+            if (!success) { pickupWindowOpen = true; toast("창문을 닫지 못했어요. 직접 확인해 주세요."); }
+        }));
     }
 
     private void page(String title, String subtitle) {
@@ -263,9 +435,46 @@ public class MainActivity extends AppCompatActivity {
     }
 
     private void showStores() {
-        page("송도동 주변 매장", "이동시간 + 예상 대기시간 순");
+        page(!searchQuery.isEmpty() ? "\u2018" + searchQuery + "\u2019 검색 결과" : nearbyArea == null ? "주변 매장" : nearbyArea + " 주변 매장",
+                searching ? "검색 중입니다." : !searchQuery.isEmpty() ? "네이버 지도 기준 · 현재 위치에서 가까운 순" : nearbyStatus);
+        LinearLayout searchRow = row();
+        android.widget.EditText searchBox = new android.widget.EditText(this);
+        searchBox.setSingleLine(true); searchBox.setTextSize(18); searchBox.setText(searchDraft);
+        searchBox.setHint("장소 검색 (예: 스타벅스, 김밥)"); searchBox.setTextColor(INK); searchBox.setHintTextColor(MUTED);
+        searchBox.setImeOptions(android.view.inputmethod.EditorInfo.IME_ACTION_SEARCH);
+        searchBox.setPadding(dp(14), dp(10), dp(14), dp(10));
+        searchBox.addTextChangedListener(new android.text.TextWatcher() {
+            @Override public void beforeTextChanged(CharSequence s, int a, int b, int c) { }
+            @Override public void onTextChanged(CharSequence s, int a, int b, int c) { }
+            @Override public void afterTextChanged(android.text.Editable e) { searchDraft = e.toString(); }
+        });
+        searchBox.setOnEditorActionListener((v, action, event) -> { runSearch(); return true; });
+        searchRow.addView(searchBox, new LinearLayout.LayoutParams(0, dp(56), 1));
+        Button searchGo = button("검색", true, this::runSearch);
+        LinearLayout.LayoutParams sp = new LinearLayout.LayoutParams(dp(110), dp(56)); sp.setMarginStart(dp(10));
+        searchRow.addView(searchGo, sp);
+        if (!searchQuery.isEmpty()) {
+            Button searchClear = button("지우기", false, this::clearSearch);
+            LinearLayout.LayoutParams cp2 = new LinearLayout.LayoutParams(dp(110), dp(56)); cp2.setMarginStart(dp(10));
+            searchRow.addView(searchClear, cp2);
+        }
+        add(content, searchRow, 8, -2);
+        LinearLayout dtRow = row();
+        dtRow.addView(text("드라이브스루(DT)만 보기", 19, INK, true), new LinearLayout.LayoutParams(0, -2, 1));
+        Switch dtSwitch = new Switch(this);
+        dtSwitch.setChecked(dtOnly);
+        dtSwitch.setContentDescription("드라이브스루 매장만 보기");
+        dtSwitch.setThumbTintList(android.content.res.ColorStateList.valueOf(dtOnly ? PRIMARY : MUTED));
+        dtSwitch.setTrackTintList(android.content.res.ColorStateList.valueOf(dtOnly ? PRIMARY : LINE));
+        dtSwitch.setOnCheckedChangeListener((view, checked) -> {
+            dtOnly = checked;
+            getPreferences(MODE_PRIVATE).edit().putBoolean("dtOnly", checked).apply();
+            render();
+        });
+        dtRow.addView(dtSwitch, new LinearLayout.LayoutParams(-2, dp(48)));
+        add(content, dtRow, 4, -2);
         LinearLayout filters = row();
-        for (String filter : new String[]{"전체", "커피", "버거", "샌드위치", "즐겨찾기"}) {
+        for (String filter : new String[]{"전체", "식당", "커피", "버거", "샌드위치", "즐겨찾기"}) {
             Button chip = button(filter, filter.equals(category), () -> { category = filter; render(); });
             LinearLayout.LayoutParams cp = new LinearLayout.LayoutParams(0, dp(50), 1);
             filters.addView(chip, cp);
@@ -273,12 +482,17 @@ public class MainActivity extends AppCompatActivity {
         content.addView(filters, params(-1, -2));
         List<PichleApi.StoreSummary> visible = new ArrayList<>();
         for (PichleApi.StoreSummary store : stores) {
+            if (dtOnly && !NearbyFinder.isDriveThrough(store.name, store.category)) continue;
             if (category.equals("즐겨찾기") && !favorites.contains(store.id)) continue;
             if (!category.equals("전체") && !category.equals("즐겨찾기") && !store.category.contains(category)) continue;
             visible.add(store);
         }
+        if (stores.isEmpty()) {
+            addText(content, nearbyStatus, 18, MUTED, false, 32);
+            return;
+        }
         if (visible.isEmpty()) {
-            addText(content, category.equals("즐겨찾기") ? "즐겨찾기한 매장이 없습니다." : "표시할 매장이 없습니다.", 18, MUTED, false, 32);
+            addText(content, category.equals("즐겨찾기") ? "즐겨찾기한 매장이 없습니다." : dtOnly ? "주변에 드라이브스루 매장이 없습니다." : "표시할 매장이 없습니다.", 18, MUTED, false, 32);
             return;
         }
         GridLayout group = new GridLayout(this);
@@ -299,11 +513,13 @@ public class MainActivity extends AppCompatActivity {
             heart.setContentDescription(store.name + " 즐겨찾기");
             title.addView(heart, params(dp(52), dp(52))); card.addView(title);
             addText(card, store.category + " · " + String.format(Locale.KOREA, "%.1fkm", store.distanceMeters / 1000.0), 16, MUTED, false, 8);
-            addText(card, "총 " + (store.driveMinutes + store.waitMinutes) + "분", 30, INK, true, 26);
-            addText(card, "이동 " + store.driveMinutes + "분 · 대기 " + store.waitMinutes + "분", 17, MUTED, false, 8);
-            addText(card, store.electronicOrdering ? "전자 주문 가능" : "음성 주문", 15, PRIMARY, true, 18);
+            boolean naver = fromNaver(store);
+            addText(card, naver ? "약 " + store.driveMinutes + "분" : "총 " + (store.driveMinutes + store.waitMinutes) + "분", 30, INK, true, 26);
+            addText(card, naver ? "예상 이동시간 · 대기 정보 없음" : "이동 " + store.driveMinutes + "분 · 대기 " + store.waitMinutes + "분", 17, MUTED, false, 8);
+            addText(card, naver ? (BrandMenuFetcher.supports(store.name) ? "공식 메뉴 보기" : "길안내 가능")
+                    : store.electronicOrdering ? "전자 주문 가능" : "음성 주문", 15, PRIMARY, true, 18);
             card.addView(new View(this), new LinearLayout.LayoutParams(-1, 0, 1));
-            Button choose = button("메뉴 보기", true, () -> chooseStore(store));
+            Button choose = button(naver && !BrandMenuFetcher.supports(store.name) ? "상세 · 길안내" : "메뉴 보기", true, () -> chooseStore(store));
             add(card, choose, 24, dp(58));
             addStoreCell(group, card, storeIndex++);
         }
@@ -348,16 +564,120 @@ public class MainActivity extends AppCompatActivity {
             cart.clear(); receipt = null; method = ""; arrived = false; voiceDelivered = false;
             navigationStatus = ""; windowStatus = "";
         }
-        selected = store; loadMenu(); go(OrderFlow.MENU);
+        selected = store; loadMenu(); loadPlaceMenu(); go(OrderFlow.MENU);
     }
 
     private void loadMenu() {
         menu.clear();
-        try { if (selected != null) menu.addAll(api.getMenu(selected.id)); }
+        try {
+            if (selected != null && !fromNaver(selected)) menu.addAll(api.getMenu(selected.id));
+        }
         catch (Exception error) { toast("메뉴를 불러오지 못했습니다."); }
     }
 
+    /** Stores found on Naver map: reference menu (if known) and navigation only; no ordering. */
+    private void showPlaceDetail() {
+        page(selected.name, String.format(Locale.KOREA, "%.1fkm · 약 %d분", selected.distanceMeters / 1000.0, selected.driveMinutes)
+                + " · " + selected.category);
+        LinearLayout info = card();
+        if (!selected.address.isEmpty()) addText(info, selected.address, 18, INK, false, 0);
+        addText(info, "대기 시간·주문 가능 여부는 제공되지 않습니다.", 16, MUTED, false, 10);
+        Button navigate = button("길안내", true, () -> {
+            if (!canEditOrder() || selected == null) return;
+            navigation.navigate(selected.latitude, selected.longitude, selected.name, selected.address);
+        });
+        add(info, navigate, 18, dp(58));
+        navigationStatusView = text(navigationStatus, 17, MUTED, false);
+        add(info, navigationStatusView, 10, -2);
+        content.addView(info);
+        if (!BrandMenuFetcher.supports(selected.name)) return;
+        addText(content, "메뉴", 24, INK, true, 22);
+        if (placeMenu.isEmpty()) { addText(content, placeMenuStatus, 18, MUTED, false, 16); return; }
+        List<String> sections = new ArrayList<>();
+        for (BrandMenuFetcher.Entry entry : placeMenu) if (!sections.contains(entry.section)) sections.add(entry.section);
+        if (placeTab == null || !sections.contains(placeTab)) placeTab = sections.get(0);
+        LinearLayout tabs = row();
+        for (String section : sections) {
+            Button tab = button(section, section.equals(placeTab), () -> { placeTab = section; render(); });
+            tab.setMinWidth(dp(120)); tab.setPadding(dp(20), 0, dp(20), 0);
+            LinearLayout.LayoutParams tp = new LinearLayout.LayoutParams(-2, dp(50));
+            tp.setMarginEnd(dp(8)); tabs.addView(tab, tp);
+        }
+        android.widget.HorizontalScrollView tabScroll = new android.widget.HorizontalScrollView(this);
+        tabScroll.setHorizontalScrollBarEnabled(false);
+        tabScroll.addView(tabs);
+        add(content, tabScroll, 16, -2);
+        GridLayout grid = new GridLayout(this);
+        grid.setColumnCount(3);
+        grid.setUseDefaultMargins(false);
+        int index = 0;
+        for (BrandMenuFetcher.Entry entry : placeMenu) {
+            if (!entry.section.equals(placeTab)) continue;
+            PichleApi.MenuItem item = toMenuItem(entry);
+            LinearLayout card = card();
+            card.addView(menuPhoto(entry), new LinearLayout.LayoutParams(-1, dp(150)));
+            addText(card, entry.name, 21, INK, true, 12);
+            addText(card, entry.detail.isEmpty() ? "칼로리 정보 없음" : entry.detail, 16, MUTED, false, 8);
+            card.addView(new View(this), new LinearLayout.LayoutParams(-1, 0, 1));
+            add(card, button("선택", false, () -> {
+                if (!canEditOrder()) return;
+                draftMenu = item; draftQuantity = 1; draftOptions.clear(); draftNote = ""; go(OrderFlow.OPTIONS);
+            }), 16, dp(54));
+            addStoreCell(grid, card, index++);
+        }
+        while (index % 3 != 0) addStoreCell(grid, new View(this), index++);
+        add(content, grid, 16, -2);
+        footerAction(count() == 0 ? "메뉴를 담아주세요" : count() + "개 담김  장바구니 보기", true, count() > 0, () -> go(OrderFlow.REVIEW));
+    }
+
+    /** Menu photo with a plain placeholder; the bitmap is filled in when it arrives. */
+    private android.widget.ImageView menuPhoto(BrandMenuFetcher.Entry entry) {
+        android.widget.ImageView photo = new android.widget.ImageView(this);
+        photo.setScaleType(android.widget.ImageView.ScaleType.FIT_CENTER);
+        photo.setBackgroundColor(BG);
+        photo.setContentDescription(entry.name);
+        final String url = entry.imageUrl;
+        if (url != null && !url.isEmpty()) {
+            photo.setTag(url);
+            images.load(url, bitmap -> runOnUiThread(() -> {
+                if (!destroyed && url.equals(photo.getTag())) photo.setImageBitmap(bitmap);
+            }));
+        }
+        return photo;
+    }
+
+    private PichleApi.MenuItem toMenuItem(BrandMenuFetcher.Entry entry) {
+        boolean starbucks = selected != null && selected.name.contains("스타벅스");
+        boolean burger = entry.section.equals("버거") || entry.section.equals("맥런치") || entry.section.equals("맥모닝");
+        String options = starbucks ? (entry.drink ? "Tall, Grande, Venti, 샷 추가, 얼음 적게, 시럽 적게" : "데워주세요, 개별 포장")
+                : burger ? "단품으로, 소스 추가, 피클 빼고, 양파 빼고"
+                : entry.drink ? "Medium, Large, 얼음 적게" : "소스 추가";
+        return new PichleApi.MenuItem((entry.drink ? "d:" : "f:") + entry.name, entry.name, 0, options);
+    }
+
+    private void loadPlaceMenu() {
+        placeMenu = Collections.emptyList(); placeTab = null;
+        if (selected == null || !BrandMenuFetcher.supports(selected.name)) { placeMenuStatus = ""; return; }
+        placeMenuStatus = "공식 메뉴를 불러오는 중입니다.";
+        final int request = ++placeMenuRequest;
+        final String name = selected.name;
+        menuWorker.execute(() -> {
+            List<BrandMenuFetcher.Entry> loaded = Collections.emptyList(); String error = "";
+            try { loaded = brandMenus.load(name); }
+            catch (Exception e) { error = e.getMessage() == null ? "메뉴를 불러오지 못했습니다." : e.getMessage(); }
+            final List<BrandMenuFetcher.Entry> result = loaded; final String message = error;
+            runOnUiThread(() -> {
+                if (destroyed || request != placeMenuRequest) return;
+                placeMenu = result; placeMenuStatus = message;
+                menu.clear();
+                for (BrandMenuFetcher.Entry entry : result) menu.add(toMenuItem(entry));
+                if (foreground) render();
+            });
+        });
+    }
+
     private void showMenu() {
+        if (fromNaver(selected)) { showPlaceDetail(); return; }
         page(selected.name, "이동 " + selected.driveMinutes + "분 · 대기 " + selected.waitMinutes + "분"
                 + " · " + (selected.electronicOrdering ? "전자 주문 가능" : "음성 주문"));
         LinearLayout group = itemGroup();
@@ -377,7 +697,7 @@ public class MainActivity extends AppCompatActivity {
     }
 
     private void showOptions() {
-        page(draftMenu.name, money(draftMenu.priceKrw));
+        page(draftMenu.name, priced() ? money(draftMenu.priceKrw) : "가격 정보 없음");
         LinearLayout options = card(); options.addView(text("옵션", 21, INK, true));
         for (String raw : draftMenu.optionSchema.split(",")) {
             String choice = raw.trim(); if (choice.isEmpty()) continue;
@@ -416,7 +736,7 @@ public class MainActivity extends AppCompatActivity {
 
     private void updateAddFooter() {
         footer.removeAllViews();
-        footerAction(draftQuantity + "개 담기 · " + money(draftMenu.priceKrw * draftQuantity), true, true, () -> {
+        footerAction(draftQuantity + "개 담기" + (priced() ? " · " + money(draftMenu.priceKrw * draftQuantity) : ""), true, true, () -> {
             saveDraftNote();
             String options = String.join(", ", draftOptions);
             if (!draftNote.trim().isEmpty()) options += (options.isEmpty() ? "" : ", ") + draftNote.trim();
@@ -443,16 +763,16 @@ public class MainActivity extends AppCompatActivity {
             }
             card.addView(heading);
             if (!item.options.isEmpty()) addText(card, item.options, 17, MUTED, false, 10);
-            addText(card, money(item.price * item.quantity), 22, INK, true, 18);
+            if (priced()) addText(card, money(item.price * item.quantity), 22, INK, true, 18);
             add(content, card, i == 0 ? 0 : 12, -2);
         }
         if (receipt == null) add(content, button("+ 메뉴 추가", false, () -> go(OrderFlow.MENU)), 16, dp(54));
-        addTotal(content);
-        footerAction(receipt != null ? "접수 내역 보기" : selected.electronicOrdering ? "주문 방법 선택" : "음성 주문 준비",
+        if (priced()) addTotal(content);
+        footerAction(receipt != null ? "접수 내역 보기" : selected.electronicOrdering ? "주문 방법 선택" : "매장으로 이동 · 길안내 시작",
                 true, true, () -> {
                     if (receipt != null) go(OrderFlow.SEND);
                     else if (selected.electronicOrdering) go(OrderFlow.METHOD);
-                    else { method = "voice"; go(OrderFlow.VOICE); }
+                    else { method = "voice"; startTravel(); }
                 });
     }
 
@@ -469,7 +789,7 @@ public class MainActivity extends AppCompatActivity {
         }
         LinearLayout voice = card(); voice.addView(text("음성으로 주문", 28, INK, true));
         addText(voice, "주문대에서 차량 스피커로 읽어줍니다.", 18, MUTED, false, 14);
-        add(voice, button("TTS 재생 화면으로", !selected.electronicOrdering, () -> { method = "voice"; go(OrderFlow.VOICE); }), 32, dp(68));
+        add(voice, button("매장으로 이동 후 음성 주문", !selected.electronicOrdering, () -> { method = "voice"; startTravel(); }), 32, dp(68));
         addGrouped(group, voice); content.addView(group);
     }
 
@@ -521,7 +841,9 @@ public class MainActivity extends AppCompatActivity {
         speechStop = button("■  중지", false, () -> speech.stop());
         LinearLayout.LayoutParams playLp = new LinearLayout.LayoutParams(0, dp(80), 3); playLp.setMarginEnd(dp(12));
         controls.addView(speechPlay, playLp); controls.addView(speechStop, new LinearLayout.LayoutParams(0, dp(80), 1));
-        add(player, controls, 24, -2); content.addView(player);
+        add(player, controls, 24, -2);
+        windowStatusView = text(uxText(windowStatus), 17, MUTED, false); add(player, windowStatusView, 10, -2);
+        content.addView(player);
         LinearLayout phrase = card();
         phrase.addView(text("주문 내용", 19, MUTED, true));
         TextView spoken = addText(phrase, orderText(), 26, INK, true, 18);
@@ -536,14 +858,21 @@ public class MainActivity extends AppCompatActivity {
 
     private void updateSpeechViews() {
         if (voiceStatusView != null) voiceStatusView.setText(uxText(voiceStatus));
-        boolean busy = speech != null && speech.isBusy();
+        boolean busy = (speech != null && speech.isBusy()) || orderWindowPending;
         if (speechPlay != null) {
             speechPlay.setText(uxText(reducedUi() ? (busy ? "재생 중" : "주문 읽기")
-                    : (busy ? "음성 재생 중…" : "▶  주문 음성 재생")));
+                    : (orderWindowPending ? "창문 여는 중…" : busy ? "음성 재생 중…" : "▶  주문하기 · 창문 열고 음성 재생")));
             boolean enabled = !busy && foreground && (!reducedUi() || preparedVoiceAllowed());
             speechPlay.setEnabled(enabled); speechPlay.setAlpha(enabled ? 1f : 0.6f);
         }
         if (speechStop != null) { speechStop.setEnabled(busy); speechStop.setAlpha(busy ? 1f : 0.4f); }
+    }
+
+    /** Go to the store first: start navigation, then the order is placed once at the window. */
+    private void startTravel() {
+        go(OrderFlow.TRAVEL);
+        if (canEditOrder() && selected != null && navigation != null)
+            navigation.navigate(selected.latitude, selected.longitude, selected.name, selected.address);
     }
 
     private void showTravel() {
@@ -552,7 +881,7 @@ public class MainActivity extends AppCompatActivity {
         destination.addView(text(selected.name, 27, INK, true));
         addText(destination, selected.address, 17, MUTED, false, 10);
         addText(destination, "이동 약 " + selected.driveMinutes + "분", 32, INK, true, 28);
-        addText(destination, "매장 대기 약 " + selected.waitMinutes + "분", 18, MUTED, false, 10);
+        if (!fromNaver(selected)) addText(destination, "매장 대기 약 " + selected.waitMinutes + "분", 18, MUTED, false, 10);
         add(destination, button("차량 내비게이션으로 길안내", true,
                 () -> navigation.navigate(selected.latitude, selected.longitude, selected.name, selected.address)), 28, dp(72));
         navigationStatusView = text(navigationStatus, 17, MUTED, false);
@@ -563,9 +892,9 @@ public class MainActivity extends AppCompatActivity {
             addText(accepted, count() + "개 · " + money(total()), 17, MUTED, false, 10);
             add(content, accepted, 16, -2);
         } else {
-            addText(content, "주문대에 도착하면 준비한 음성을 재생할 수 있습니다.", 18, MUTED, false, 20);
+            addText(content, "주문대에 도착하면 주문하기를 눌러 주세요. 창문이 열리고 주문 음성이 나옵니다.", 18, MUTED, false, 20);
         }
-        footerAction(receipt == null && !voiceDelivered ? "주문대 도착 · 음성 주문" : "매장 도착 · 수령하기", false, true, () -> {
+        footerAction(receipt == null && !voiceDelivered ? "주문대 도착 · 주문하기" : "매장 도착 · 수령하기", false, true, () -> {
             arrived = true;
             go(receipt == null && !voiceDelivered ? OrderFlow.VOICE : OrderFlow.PICKUP);
         });
@@ -580,15 +909,12 @@ public class MainActivity extends AppCompatActivity {
         }
         LinearLayout window = card();
         window.addView(text("운전석 창문", 24, INK, true));
-        addText(window, "수령 창구에 정차한 후 내려주세요.", 18, MUTED, false, 12);
-        add(window, button("운전석 창문 내리기", true, () -> windows.lowerDriverWindow()), 24, dp(76));
+        addText(window, "수령 창구에 정차한 후 눌러주세요. 수령 완료를 누르면 창문이 닫힙니다.", 18, MUTED, false, 12);
+        add(window, button("수령 · 창문 열기", true, this::openPickupWindow), 24, dp(76));
         windowStatusView = text(windowStatus, 17, MUTED, false); add(window, windowStatusView, 14, -2);
         add(content, window, receipt == null ? 0 : 16, -2);
         orderSummary(content);
-        footerAction("수령 완료", false, true, () -> {
-            cart.clear(); receipt = null; method = ""; voiceDelivered = false; arrived = false;
-            toast("수령이 완료됐습니다."); go(OrderFlow.STORES);
-        });
+        footerAction(pickupFinishing ? "창문 닫는 중…" : "수령 완료", false, !pickupFinishing, this::completePickup);
     }
 
     private void goBack() {
@@ -600,17 +926,27 @@ public class MainActivity extends AppCompatActivity {
             case METHOD: go(OrderFlow.REVIEW); break;
             case SEND: go(receipt == null ? OrderFlow.METHOD : OrderFlow.REVIEW); break;
             case VOICE: go(arrived ? OrderFlow.TRAVEL : selected.electronicOrdering ? OrderFlow.METHOD : OrderFlow.REVIEW); break;
-            case TRAVEL: go(receipt == null ? OrderFlow.VOICE : OrderFlow.SEND); break;
+            case TRAVEL: go(receipt != null ? OrderFlow.SEND : selected.electronicOrdering ? OrderFlow.METHOD : OrderFlow.REVIEW); break;
             case PICKUP: go(receipt == null ? OrderFlow.VOICE : OrderFlow.TRAVEL); break;
             default: moveTaskToBack(true);
         }
     }
 
+    private static final String[] NATIVE = {"", "한", "두", "세", "네", "다섯", "여섯", "일곱", "여덟", "아홉", "열",
+            "열한", "열두", "열세", "열네", "열다섯", "열여섯", "열일곱", "열여덟", "열아홉", "스무"};
+
+    /** The line spoken at the order window: greeting, each item with a Korean counter, closing. */
     private String orderText() {
         ArrayList<String> phrases = new ArrayList<>();
-        for (CartItem item : cart) phrases.add(item.name + " " + item.quantity + "개"
-                + (item.options.isEmpty() ? "" : ", " + item.options));
-        return "안녕하세요. " + String.join(". ", phrases) + ". 주문하겠습니다. 감사합니다.";
+        for (CartItem item : cart) {
+            String unit = item.id.startsWith("d:") ? "잔" : "개";
+            String count = item.quantity < NATIVE.length ? NATIVE[item.quantity] + " " + unit : item.quantity + unit;
+            String name = item.name.replaceAll("[®™]", "");
+            String options = item.options.replace("Tall", "톨").replace("Grande", "그란데").replace("Venti", "벤티")
+                    .replace("Medium", "미디엄").replace("Large", "라지");
+            phrases.add(name + " " + count + " 주세요" + (options.isEmpty() ? "" : ". 옵션은 " + options + "입니다"));
+        }
+        return "안녕하세요. 주문할게요. " + String.join(". ", phrases) + ". 이상입니다. 감사합니다.";
     }
 
     private void orderSummary(LinearLayout parent) {
@@ -618,7 +954,8 @@ public class MainActivity extends AppCompatActivity {
         for (CartItem item : cart) {
             LinearLayout line = row();
             line.addView(text(item.name + " " + item.quantity + "개", 18, INK, false), new LinearLayout.LayoutParams(0, -2, 1));
-            line.addView(text(money(item.price * item.quantity), 18, INK, true)); add(summary, line, 18, -2);
+            if (priced()) line.addView(text(money(item.price * item.quantity), 18, INK, true));
+            add(summary, line, 18, -2);
             if (!item.options.isEmpty()) addText(summary, item.options, 15, MUTED, false, 6);
         }
         add(parent, summary, 16, -2);
@@ -687,6 +1024,7 @@ public class MainActivity extends AppCompatActivity {
     private GradientDrawable fill(int color, int radius) { GradientDrawable b = new GradientDrawable(); b.setColor(color); b.setCornerRadius(dp(radius)); return b; }
     private LinearLayout.LayoutParams params(int width, int height) { return new LinearLayout.LayoutParams(width, height); }
     private int dp(int v) { return Math.round(v * getResources().getDisplayMetrics().density); }
+    private boolean priced() { return !fromNaver(selected); }
     private String money(int value) { return String.format(Locale.KOREA, "%,d원", value); }
     private int total() { int n = 0; for (CartItem i : cart) n += i.price * i.quantity; return n; }
     private int count() { int n = 0; for (CartItem i : cart) n += i.quantity; return n; }
@@ -730,6 +1068,7 @@ public class MainActivity extends AppCompatActivity {
         super.onStart();
         foreground = true;
         if (uxGate != null) uxGate.start();
+        if (!reducedUi()) startNearby();
     }
 
     @Override protected void onStop() {
@@ -744,9 +1083,18 @@ public class MainActivity extends AppCompatActivity {
     @Override protected void onDestroy() {
         destroyed = true;
         if (uxGate != null) uxGate.close();
-        if (speech != null) speech.close();
+        if (nearby != null) nearby.close();
+        brandMenus.close(); menuWorker.shutdownNow(); images.close();
+        if (speech != null) { speech.setFinishListener(null); speech.close(); }
         if (navigation != null) navigation.close();
-        if (windows != null) windows.close();
+        if (windows != null) {
+            if (orderWindowOpen || pickupWindowOpen) {
+                // Ask for the window to be closed and keep the vehicle connection a little longer.
+                windows.raiseDriverWindow((success, message) -> { });
+                final PleosWindowController pending = windows;
+                new android.os.Handler(getMainLooper()).postDelayed(pending::close, 20000);
+            } else windows.close();
+        }
         super.onDestroy();
     }
 

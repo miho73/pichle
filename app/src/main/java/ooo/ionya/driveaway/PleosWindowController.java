@@ -26,6 +26,7 @@ public final class PleosWindowController {
     private final Handler main = new Handler(Looper.getMainLooper());
     private Vehicle vehicle;
     private int generation;
+    private boolean opening = true;
     private boolean busy;
     private Runnable timeout;
     private Runnable positionPoll;
@@ -39,15 +40,22 @@ public final class PleosWindowController {
         this.listener = listener;
     }
 
+    public boolean isBusy() { return busy; }
+
     public void lowerDriverWindow() {
         listener.onStatus("운전석 창문을 확인하고 있어요.");
         lowerDriverWindow((success, message) -> listener.onStatus(message));
     }
 
+    /** Closes the driver window again (position 0). */
+    public void raiseDriverWindow(Callback callback) { moveDriverWindow(false, callback); }
+
     /** No window movement happens during construction or service initialization. */
-    public void lowerDriverWindow(Callback callback) {
+    public void lowerDriverWindow(Callback callback) { moveDriverWindow(true, callback); }
+
+    private void moveDriverWindow(boolean open, Callback callback) {
         if (Looper.myLooper() != Looper.getMainLooper()) {
-            main.post(() -> lowerDriverWindow(callback));
+            main.post(() -> moveDriverWindow(open, callback));
             return;
         }
         if (busy) {
@@ -55,6 +63,7 @@ public final class PleosWindowController {
             return;
         }
         busy = true;
+        opening = open;
         int request = ++generation;
         timeout = () -> finish(request, callback, false,
                 "차량 서비스 응답이 없어요. Pleos 연결과 창문 권한을 확인해 주세요.");
@@ -103,7 +112,7 @@ public final class PleosWindowController {
         }
         // Pleos forwards WINDOW_POS unchanged: Android defines 0 as closed and the supported maximum as fully open.
         // Use this window area's reported maximum instead of treating the value as a percentage closed.
-        int targetPosition = bounds.getMaxValue();
+        int targetPosition = opening ? bounds.getMaxValue() : bounds.getMinValue();
         try {
             vehicle.getWindow().setWindowPosition(driver, targetPosition, (area, value) -> {
                 main.post(() -> verifyWindowPosition(request, driver, targetPosition, callback));
@@ -121,9 +130,9 @@ public final class PleosWindowController {
         if (!active(request)) return;
         if (timeout != null) main.removeCallbacks(timeout);
         timeout = () -> finish(request, callback, false,
-                "내림 요청은 전달했지만 창문 위치가 아직 변경되지 않았어요. 차량 상태를 확인해 주세요.");
+                (opening ? "내림" : "올림") + " 요청은 전달했지만 창문 위치가 아직 변경되지 않았어요. 차량 상태를 확인해 주세요.");
         main.postDelayed(timeout, 8000);
-        listener.onStatus("창문 내림 요청을 전달했어요. 창문 위치를 확인하고 있어요.");
+        listener.onStatus(opening ? "창문 내림 요청을 전달했어요. 창문 위치를 확인하고 있어요." : "창문 올림 요청을 전달했어요. 창문 위치를 확인하고 있어요.");
         pollWindowPosition(request, driver, targetPosition, callback);
     }
 
@@ -134,7 +143,7 @@ public final class PleosWindowController {
                 main.post(() -> {
                     if (!active(request)) return;
                     if (position != null && position == targetPosition) {
-                        finish(request, callback, true, "운전석 창문이 내려갔어요.");
+                        finish(request, callback, true, opening ? "운전석 창문이 내려갔어요." : "운전석 창문이 닫혔어요.");
                     } else {
                         positionPoll = () -> pollWindowPosition(request, driver, targetPosition, callback);
                         main.postDelayed(positionPoll, 500);
@@ -143,12 +152,12 @@ public final class PleosWindowController {
                 return Unit.INSTANCE;
             }, error -> {
                 main.post(() -> finish(request, callback, false,
-                        "내림 요청은 전달했지만 창문 위치를 확인하지 못했어요. 차량 상태를 확인해 주세요."));
+                        (opening ? "내림" : "올림") + " 요청은 전달했지만 창문 위치를 확인하지 못했어요. 차량 상태를 확인해 주세요."));
                 return Unit.INSTANCE;
             });
         } catch (Exception error) {
             finish(request, callback, false,
-                    "내림 요청은 전달했지만 창문 위치를 확인하지 못했어요. 차량 상태를 확인해 주세요.");
+                    (opening ? "내림" : "올림") + " 요청은 전달했지만 창문 위치를 확인하지 못했어요. 차량 상태를 확인해 주세요.");
         }
     }
 
@@ -187,6 +196,6 @@ public final class PleosWindowController {
     private String describe(Exception error) {
         if (error instanceof SecurityException) return "창문 제어 권한이 허용되지 않았어요.";
         String detail = error.getLocalizedMessage();
-        return "창문을 내리지 못했어요." + (detail == null || detail.isEmpty() ? "" : " " + detail);
+        return (opening ? "창문을 내리지 못했어요." : "창문을 닫지 못했어요.") + (detail == null || detail.isEmpty() ? "" : " " + detail);
     }
 }
