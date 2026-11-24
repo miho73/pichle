@@ -1,0 +1,80 @@
+name: Build and Deploy
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - main
+    paths:
+      - "dill/**"
+      - ".github/workflows/cd.yml"
+
+concurrency:
+  group: pichle-deploy
+  cancel-in-progress: false
+
+jobs:
+  build-and-deploy:
+    name: Build and Deploy
+    runs-on: [self-hosted, linux, ionya, user_server, pichle]
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0
+
+      - name: Prepare persistent mounts
+        shell: bash
+        run: |
+          set -euo pipefail
+          config_path=/home/server/pichle/config.yml
+          logs_path=/home/server/pichle/logs
+          if [ ! -f "$config_path" ] || [ ! -r "$config_path" ]; then
+            echo "::error::The runner must be able to read /home/server/pichle/config.yml as a file."
+            exit 1
+          fi
+          mkdir -p "$logs_path"
+          if [ ! -d "$logs_path" ] || [ ! -w "$logs_path" ] || [ ! -x "$logs_path" ]; then
+            echo "::error::The runner must be able to write /home/server/pichle/logs."
+            exit 1
+          fi
+          if [ -e "$logs_path/app.log" ] && [ ! -w "$logs_path/app.log" ]; then
+            echo "::error::The runner must be able to append to the existing app.log."
+            exit 1
+          fi
+
+      - name: Build docker image
+        shell: bash
+        run: |
+          set -euo pipefail
+          docker build \
+            -t "pichle:${GITHUB_SHA}" \
+            -t pichle:latest \
+            --build-arg "APP_COMMIT=${GITHUB_SHA}" \
+            ./dill
+          echo "BUILD_COMMIT_AT=$(git show -s --format=%cI HEAD)" >> "$GITHUB_ENV"
+          echo "BUILD_AT=$(date --iso-8601=seconds)" >> "$GITHUB_ENV"
+
+      - name: Remove previous container
+        shell: bash
+        run: |
+          docker stop pichle || true
+          docker rm pichle || true
+
+      - name: Create container
+        shell: bash
+        run: |
+          set -euo pipefail
+          docker run \
+            -d -q \
+            --restart unless-stopped \
+            --user "$(id -u):$(id -g)" \
+            -p 41001:8000 \
+            --mount type=bind,source=/home/server/pichle/logs,target=/app/logs \
+            --mount type=bind,source=/home/server/pichle/config.yml,target=/app/config.yml,readonly \
+            -e DILL_CONFIG_PATH=/app/config.yml \
+            -e "BUILD_COMMIT=${GITHUB_SHA}" \
+            -e "BUILD_COMMIT_AT=${BUILD_COMMIT_AT}" \
+            -e "BUILD_AT=${BUILD_AT}" \
+            --add-host=host.docker.internal:host-gateway \
+            --name pichle \
+            "pichle:${GITHUB_SHA}"
