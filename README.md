@@ -130,6 +130,8 @@ flowchart LR
 
 방문 신호 수집·혼잡도 추정 서버는 아직 구현하지 않았습니다.
 
+[![Build and Deploy](https://github.com/miho73/pichle/actions/workflows/cd.yml/badge.svg)](https://github.com/miho73/pichle/actions/workflows/cd.yml)
+
 ## 성장 목표와 확장 계획
 
 ![계획서의 MAU 목표: 월간 이용 비율 10%에서 2,683명, 20%에서 5,366명, 30%에서 8,049명](assets/readme/mau-scenarios.png)
