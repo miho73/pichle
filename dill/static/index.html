@@ -15,17 +15,17 @@
       <div id="manager-header-tools" class="manager-header-tools" hidden>
         <div class="connection" role="status"><span id="connection-dot" class="connection-dot"></span><span id="connection-text">연결 중</span></div>
         <span id="manager-username" class="manager-username"></span>
+        <button id="clear-menu-cache-button" class="logout-button menu-cache-button" type="button">메뉴 캐시 비우기</button>
         <button id="logout-button" class="logout-button" type="button">로그아웃</button>
       </div>
     </div>
   </header>
 
   <main id="auth-screen" class="auth-screen">
-    <div id="auth-loading" class="auth-loading" role="status"><span class="loading-ring" aria-hidden="true"></span><p id="auth-loading-text">접속을 확인하고 있습니다.</p></div>
+    <div id="auth-loading" class="auth-loading" role="status"><span class="loading-ring" aria-hidden="true"></span><p id="auth-loading-text">연결 확인 중</p></div>
     <section id="login-panel" class="login-panel" aria-labelledby="login-title" hidden>
       <p class="login-eyebrow">PICHLE MANAGER</p>
       <h1 id="login-title">매니저 로그인</h1>
-      <p class="login-description">접수된 주문과 수령 코드를 확인하세요.</p>
       <div id="login-message" class="login-message" role="alert" hidden></div>
       <form id="login-form">
         <label for="login-username">아이디</label>
@@ -41,12 +41,12 @@
 
   <main id="manager-workspace" class="workspace" hidden>
     <section class="page-heading" aria-labelledby="page-title">
-      <div><p id="today" class="eyebrow"></p><h1 id="page-title">주문 접수</h1><p class="page-description">들어온 주문을 확인하고 준비 상태를 알려주세요.</p></div>
+      <div><p id="today" class="eyebrow"></p><h1 id="page-title">주문 접수</h1></div>
       <div class="store-field"><label for="store-select">매장</label><select id="store-select"><option value="">전체 매장</option></select></div>
     </section>
 
-    <section class="overview" aria-label="최근 조회 주문 현황">
-      <div class="overview-card"><span class="overview-label"><span class="status-dot received"></span>새 주문</span><strong id="received-count">—</strong><span class="overview-unit">건</span></div>
+    <section class="overview" aria-label="주문 현황">
+      <div class="overview-card"><span class="overview-label"><span class="status-dot received"></span>확인 대기</span><strong id="received-count">—</strong><span class="overview-unit">건</span></div>
       <div class="overview-card"><span class="overview-label"><span class="status-dot preparing"></span>준비 중</span><strong id="preparing-count">—</strong><span class="overview-unit">건</span></div>
       <div class="overview-card"><span class="overview-label"><span class="status-dot ready"></span>준비 완료</span><strong id="ready-count">—</strong><span class="overview-unit">건</span></div>
     </section>
@@ -55,24 +55,23 @@
       <div class="toolbar">
         <div class="tabs" role="tablist" aria-label="주문 상태">
           <button class="tab is-active" type="button" role="tab" data-status="ALL" aria-selected="true" aria-controls="orders-grid">전체 <span data-count="ALL">0</span></button>
-          <button class="tab" type="button" role="tab" data-status="RECEIVED" aria-selected="false" aria-controls="orders-grid" tabindex="-1">접수 <span data-count="RECEIVED">0</span></button>
+          <button class="tab" type="button" role="tab" data-status="RECEIVED" aria-selected="false" aria-controls="orders-grid" tabindex="-1">확인 대기 <span data-count="RECEIVED">0</span></button>
           <button class="tab" type="button" role="tab" data-status="PREPARING" aria-selected="false" aria-controls="orders-grid" tabindex="-1">준비 중 <span data-count="PREPARING">0</span></button>
           <button class="tab" type="button" role="tab" data-status="READY" aria-selected="false" aria-controls="orders-grid" tabindex="-1">준비 완료 <span data-count="READY">0</span></button>
           <button class="tab" type="button" role="tab" data-status="CLOSED" aria-selected="false" aria-controls="orders-grid" tabindex="-1">완료·취소 <span data-count="CLOSED">0</span></button>
         </div>
         <label class="search-field"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" aria-hidden="true"><circle cx="10.5" cy="10.5" r="6.5"></circle><path d="m15.5 15.5 4.5 4.5"></path></svg><input id="order-search" type="search" placeholder="수령 코드 또는 메뉴 검색" autocomplete="off" aria-label="수령 코드 또는 메뉴 검색"></label>
       </div>
-      <div class="list-meta"><p id="list-summary" role="status">주문을 불러오고 있습니다.</p><div class="refresh-tools"><span id="updated-at">실시간 주문 수신</span><button id="refresh-button" class="text-button" type="button"><svg viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.6" aria-hidden="true"><path d="M16.5 9a6.5 6.5 0 1 0-.9 4.4M16.5 3.5V9H11"></path></svg>새로고침</button></div></div>
+      <div class="list-meta"><p id="list-summary" role="status"></p><div class="refresh-tools"><span id="updated-at"></span><button id="refresh-button" class="text-button" type="button"><svg viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.6" aria-hidden="true"><path d="M16.5 9a6.5 6.5 0 1 0-.9 4.4M16.5 3.5V9H11"></path></svg>새로고침</button></div></div>
 
-      <div id="sync-notice" class="notice" role="status" hidden><span>연결을 확인하고 있습니다. 마지막으로 받은 주문을 표시합니다.</span><button id="retry-button" type="button">다시 연결</button></div>
+      <div id="sync-notice" class="notice" role="status" hidden><span>주문 연결 확인 중</span><button id="retry-button" type="button">다시 연결</button></div>
       <div id="action-notice" class="notice notice-error" role="alert" hidden><span id="action-message"></span><button id="dismiss-notice" type="button" aria-label="알림 닫기">닫기</button></div>
 
       <div id="orders-grid" class="orders-grid" role="tabpanel" aria-label="주문 카드"></div>
       <div id="empty-state" class="empty-state">
         <svg class="empty-icon" viewBox="0 0 64 64" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><path d="M19 12h26v43l-6-4-7 4-7-4-6 4V12Z"></path><path d="M25 24h14M25 32h14M25 40h8M25 7h14v10H25z" fill="var(--page)"></path></svg>
-        <h2 id="empty-title">주문을 불러오고 있습니다</h2><p id="empty-description">새 주문이 들어오면 이곳에 표시됩니다.</p>
+        <h2 id="empty-title">주문 불러오는 중</h2>
       </div>
-      <p id="window-note" class="window-note">최근 조회한 주문을 기준으로 표시합니다.</p>
     </section>
   </main>
 </body>

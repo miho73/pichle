@@ -4,7 +4,7 @@ import { ManagerSocket } from "./socket.js";
 
 (() => {
   const STATUS = {
-    RECEIVED: { label: "접수", className: "received", action: "접수 확인", next: "PREPARING" },
+    RECEIVED: { label: "확인 대기", className: "received", action: "접수하기", next: "PREPARING" },
     PREPARING: { label: "준비 중", className: "preparing", action: "준비 완료", next: "READY" },
     READY: { label: "준비 완료", className: "ready", action: "수령 완료", next: "COMPLETED" },
     COMPLETED: { label: "완료", className: "completed" },
@@ -26,6 +26,7 @@ import { ManagerSocket } from "./socket.js";
   let accountNeedsSetup = false;
   let clearingAuth = false;
   let lastSnapshotAt = 0;
+  let menuCacheBusy = false;
   const realtime = new ManagerSocket({
     onSnapshot: receiveSnapshot,
     onConnection: connection,
@@ -76,7 +77,7 @@ import { ManagerSocket } from "./socket.js";
     const timestamp = new Date(value).getTime();
     if (!Number.isFinite(timestamp)) return "";
     const minutes = Math.max(0, Math.floor((Date.now() - timestamp) / 60000));
-    if (minutes < 1) return "방금 접수";
+    if (minutes < 1) return "방금 도착";
     if (minutes < 60) return `${minutes}분 전`;
     if (minutes < 1440) return `${Math.floor(minutes / 60)}시간 전`;
     return `${Math.floor(minutes / 1440)}일 전`;
@@ -119,10 +120,12 @@ import { ManagerSocket } from "./socket.js";
     text($("manager-username"), "");
     text($("action-message"), "");
     $("action-notice").hidden = true;
+    menuCacheBusy = false;
+    $("clear-menu-cache-button").disabled = false;
+    text($("clear-menu-cache-button"), "메뉴 캐시 비우기");
     $("sync-notice").hidden = true;
-    text($("updated-at"), "실시간 주문 수신");
-    text($("list-summary"), "주문을 불러오고 있습니다.");
-    text($("window-note"), "최근 주문 100건을 기준으로 표시합니다.");
+    text($("updated-at"), "");
+    text($("list-summary"), "");
     renderCounts();
     try { localStorage.removeItem("pichle.manager.store"); } catch (_) { /* Storage is optional. */ }
   }
@@ -157,7 +160,7 @@ import { ManagerSocket } from "./socket.js";
     $("auth-screen").hidden = false;
     $("login-panel").hidden = true;
     $("auth-loading").hidden = false;
-    text($("auth-loading-text"), message || "접속을 확인하고 있습니다.");
+    text($("auth-loading-text"), message || "연결 확인 중");
   }
 
   function beginAuthRequest() {
@@ -244,7 +247,7 @@ import { ManagerSocket } from "./socket.js";
 
   function connection(mode) {
     $("connection-dot").className = `connection-dot${mode === "online" ? " online" : mode === "offline" ? " offline" : ""}`;
-    text($("connection-text"), mode === "online" ? "실시간 수신 중" : mode === "offline" ? "연결 확인 중" : "연결 중");
+    text($("connection-text"), mode === "online" ? "연결됨" : mode === "offline" ? "연결 확인 중" : "연결 중");
     if (state.authenticated) {
       if (mode === "offline") state.failed = true;
       else if (mode === "online") state.failed = false;
@@ -389,17 +392,14 @@ import { ManagerSocket } from "./socket.js";
     $("orders-grid").replaceChildren(...visible.map(orderCard));
     $("empty-state").hidden = visible.length > 0;
     if (!state.loaded) {
-      text($("empty-title"), state.failed ? "연결을 확인해주세요" : "주문을 불러오고 있습니다");
-      text($("empty-description"), state.failed ? "연결되면 접수된 주문을 바로 확인할 수 있습니다." : "새 주문이 들어오면 이곳에 표시됩니다.");
+      text($("empty-title"), state.failed ? "연결 확인 중" : "주문 불러오는 중");
     } else if (state.search.trim()) {
       text($("empty-title"), "검색 결과가 없습니다");
-      text($("empty-description"), "수령 코드 또는 메뉴 이름을 다시 확인해주세요.");
     } else {
-      text($("empty-title"), state.orders.length === 0 ? "접수된 주문이 없습니다" : "표시할 주문이 없습니다");
-      text($("empty-description"), state.orders.length === 0 ? "새 주문이 들어오면 이곳에 표시됩니다." : "다른 주문 상태를 선택해 확인해주세요.");
+      text($("empty-title"), state.orders.length === 0 ? "들어온 주문이 없습니다" : "표시할 주문이 없습니다");
     }
-    if (state.loaded) text($("list-summary"), `${visible.length}건 표시 · 최근 ${state.orders.length}건 기준`);
-    else text($("list-summary"), state.failed ? "주문 연결을 확인하고 있습니다." : "주문을 불러오고 있습니다.");
+    const summaryLabel = state.status === "ALL" ? "주문" : state.status === "CLOSED" ? "완료·취소" : STATUS[state.status].label;
+    text($("list-summary"), state.loaded ? `${summaryLabel} ${visible.length}건` : "");
     if (focusOrderId) {
       const card = [...$("orders-grid").children].find((node) => node.dataset.orderId === focusOrderId);
       const replacement = card && [...card.querySelectorAll("button")].find((button) => !button.disabled && (focusNext ? button.dataset.next === focusNext : button.classList.contains("order-cancel")));
@@ -414,7 +414,6 @@ import { ManagerSocket } from "./socket.js";
     renderOrders();
     $("sync-notice").hidden = !state.failed;
     if (state.lastUpdated) text($("updated-at"), `${clock.format(state.lastUpdated)} 수신`);
-    text($("window-note"), state.loaded ? (state.total > state.orders.length ? `선택한 매장 전체 ${state.total}건 중 최근 ${state.orders.length}건을 표시합니다.` : `최근 조회한 ${state.orders.length}건을 기준으로 상태와 건수를 표시합니다.`) : "최근 주문 100건을 기준으로 표시합니다.");
   }
 
   async function updateStatus(order, status) {
@@ -438,8 +437,7 @@ import { ManagerSocket } from "./socket.js";
     } catch (error) {
       if (!state.authenticated || session !== authEpoch) return;
       if (error.code === "STALE_RESPONSE") return;
-      text($("action-message"), error.status === 409 ? "다른 화면에서 주문 상태가 변경되었습니다. 최신 주문을 확인해주세요." : `${order.pickupCode} 주문 상태를 변경하지 못했습니다. 잠시 후 다시 눌러주세요.`);
-      $("action-notice").hidden = false;
+      showActionMessage(error.status === 409 ? "다른 화면에서 주문 상태가 변경되었습니다. 최신 주문을 확인해주세요." : `${order.pickupCode} 주문 상태를 변경하지 못했습니다. 잠시 후 다시 눌러주세요.`);
     } finally {
       window.clearTimeout(timeout);
       mutationControllers.delete(controller);
@@ -448,6 +446,42 @@ import { ManagerSocket } from "./socket.js";
       $("refresh-button").disabled = pending.size > 0;
       render();
       if (pending.size === 0) realtime.requestSnapshot();
+    }
+  }
+
+  function showActionMessage(message, success = false) {
+    text($("action-message"), message);
+    $("action-notice").classList.toggle("notice-error", !success);
+    $("action-notice").classList.toggle("notice-success", success);
+    $("action-notice").setAttribute("role", success ? "status" : "alert");
+    $("action-notice").hidden = false;
+  }
+
+  async function clearMenuCache() {
+    if (!state.authenticated || menuCacheBusy) return;
+    const session = authEpoch;
+    menuCacheBusy = true;
+    $("clear-menu-cache-button").disabled = true;
+    text($("clear-menu-cache-button"), "비우는 중…");
+    $("action-notice").hidden = true;
+    const controller = new AbortController();
+    mutationControllers.add(controller);
+    const timeout = window.setTimeout(() => controller.abort(), 10000);
+    try {
+      const result = await jsonRequest("/v1/menus/cache", { method: "DELETE", signal: controller.signal });
+      if (!state.authenticated || session !== authEpoch) return;
+      if (!result || result.ok !== true || !Array.isArray(result.brands)) throw new Error("Invalid cache response");
+      showActionMessage("메뉴 캐시를 비웠어요.", true);
+    } catch (error) {
+      if (!state.authenticated || session !== authEpoch || error.code === "STALE_RESPONSE") return;
+      showActionMessage("메뉴 캐시를 비우지 못했어요. 다시 시도해주세요.");
+    } finally {
+      window.clearTimeout(timeout);
+      mutationControllers.delete(controller);
+      if (!state.authenticated || session !== authEpoch) return;
+      menuCacheBusy = false;
+      $("clear-menu-cache-button").disabled = false;
+      text($("clear-menu-cache-button"), "메뉴 캐시 비우기");
     }
   }
 
@@ -474,6 +508,7 @@ import { ManagerSocket } from "./socket.js";
   $("login-form").addEventListener("submit", loginManager);
   $("auth-retry-button").addEventListener("click", retryLogin);
   $("logout-button").addEventListener("click", logoutManager);
+  $("clear-menu-cache-button").addEventListener("click", clearMenuCache);
   document.addEventListener("visibilitychange", () => {
     if (!document.hidden && state.authenticated) realtime.resume();
   });

@@ -10,12 +10,13 @@ from sqlalchemy.exc import SQLAlchemyError
 
 from .core.config import BASE_DIR, ConfigError, LogConfig, load_config
 from .core.logger import setup_logging
+from .core.brand_menus import BrandMenuService
 from .core.middleware import RequestSizeLimit
 from .core.order_events import OrderEvents
 from .core.request_logging import RequestLoggingMiddleware
 from .core.security import install_manager_auth
 from .model.order_repository import OrderConflict, OrderNotFound, OrderRepository
-from .router import manager, orders, pages, realtime
+from .router import manager, menus, orders, pages, realtime
 
 
 setup_logging(LogConfig())
@@ -28,6 +29,7 @@ except ConfigError as error:
 setup_logging(config.log)
 repository = OrderRepository(config.database)
 order_events = OrderEvents()
+brand_menus = BrandMenuService()
 
 
 @asynccontextmanager
@@ -47,14 +49,18 @@ async def lifespan(app: FastAPI):
         try:
             await order_events.stop()
         finally:
-            repository.dispose()
-            logger.info("주문 서버를 종료했습니다.", extra={"event": "server_stopped"})
+            try:
+                await brand_menus.close()
+            finally:
+                repository.dispose()
+                logger.info("주문 서버를 종료했습니다.", extra={"event": "server_stopped"})
 
 
 app = FastAPI(title="Dill · Pichle Orders", version="0.1.0", lifespan=lifespan)
 app.state.config = config
 app.state.order_repository = repository
 app.state.order_events = order_events
+app.state.brand_menus = brand_menus
 app.add_middleware(RequestSizeLimit)
 install_manager_auth(app, config)
 app.add_middleware(RequestLoggingMiddleware)
@@ -62,6 +68,7 @@ app.mount("/static", StaticFiles(directory=BASE_DIR / "static", check_dir=False)
 app.include_router(pages.router)
 app.include_router(orders.router)
 app.include_router(manager.router)
+app.include_router(menus.router)
 app.include_router(realtime.router)
 
 

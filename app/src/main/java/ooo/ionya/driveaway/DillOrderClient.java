@@ -21,10 +21,10 @@ import java.nio.charset.StandardCharsets;
 import java.util.Locale;
 import java.util.UUID;
 
-/** Blocking HTTP transport. Call submitOrder from the order worker, never the UI thread. */
+/** Blocking HTTP transport. Submit and status reads run on the order worker, never the UI thread. */
 public final class DillOrderClient {
     public static final String DEFAULT_BASE_URL = "https://pichle.ionya.ooo";
-    private static final String APP_API_KEY = "pichle-pleos-pt-2026";
+    static final String APP_API_KEY = "pichle-pleos-pt-2026";
     private static final String BASE_URL_KEY = "base_url";
     private static final int MAX_RESPONSE_BYTES = 512 * 1024;
     private static final int MAX_REQUEST_BYTES = 128 * 1024;
@@ -186,6 +186,62 @@ public final class DillOrderClient {
         } catch (IOException error) {
             if (error instanceof OrderException) throw error;
             throw new OrderException("주문 서버에 연결하지 못했습니다. 서버 주소와 네트워크를 확인해주세요.", error);
+        } finally {
+            if (connection != null) connection.disconnect();
+        }
+    }
+
+    /** Reads only this order's live state; the app key cannot read manager order details. */
+    public PichleApi.OrderReceipt getOrderStatus(String orderId) throws IOException {
+        if (orderId == null) throw new OrderException("조회할 주문을 확인해주세요.");
+        final String requestedId;
+        try {
+            requestedId = UUID.fromString(orderId).toString();
+            if (!requestedId.equalsIgnoreCase(orderId)) throw new IllegalArgumentException();
+        } catch (IllegalArgumentException error) {
+            throw new OrderException("조회할 주문을 확인해주세요.", error);
+        }
+        final String baseUrl = getBaseUrl();
+        try { requireAllowedTransport(baseUrl); }
+        catch (IllegalArgumentException error) { throw new OrderException(error.getMessage(), error); }
+        HttpURLConnection connection = null;
+        try {
+            connection = (HttpURLConnection) new URL(baseUrl + "/v1/orders/" + requestedId + "/status").openConnection();
+            connection.setConnectTimeout(8_000);
+            connection.setReadTimeout(15_000);
+            connection.setInstanceFollowRedirects(false);
+            connection.setUseCaches(false);
+            connection.setRequestMethod("GET");
+            connection.setRequestProperty("Accept", "application/json");
+            connection.setRequestProperty("Cache-Control", "no-cache");
+            connection.setRequestProperty("X-API-Key", APP_API_KEY);
+            int status = connection.getResponseCode();
+            if (status != 200) throw statusError(status);
+            String response;
+            try (InputStream stream = connection.getInputStream()) { response = readResponse(stream); }
+            JSONObject body = new JSONObject(response);
+            String receivedId;
+            String pickupCode;
+            String state;
+            try {
+                receivedId = requiredString(body, "orderId");
+                pickupCode = requiredString(body, "pickupCode");
+                state = requiredString(body, "status");
+            } catch (IOException error) {
+                throw new OrderException("주문 상태 응답을 확인하지 못했습니다. 잠시 후 다시 확인해주세요.", error);
+            }
+            if (!requestedId.equals(receivedId)
+                    || !(state.equals("RECEIVED") || state.equals("PREPARING") || state.equals("READY")
+                    || state.equals("COMPLETED") || state.equals("CANCELLED")))
+                throw new OrderException("주문 상태 응답을 확인하지 못했습니다. 잠시 후 다시 확인해주세요.");
+            return new PichleApi.OrderReceipt(receivedId, state, pickupCode);
+        } catch (SocketTimeoutException error) {
+            throw new OrderException("주문 상태 확인이 늦어지고 있습니다. 잠시 후 다시 확인해주세요.", error);
+        } catch (JSONException error) {
+            throw new OrderException("주문 상태 응답을 읽지 못했습니다. 잠시 후 다시 확인해주세요.", error);
+        } catch (IOException error) {
+            if (error instanceof OrderException) throw error;
+            throw new OrderException("주문 상태를 불러오지 못했습니다. 서버 연결을 확인해주세요.", error);
         } finally {
             if (connection != null) connection.disconnect();
         }

@@ -40,6 +40,10 @@ public class MainActivity extends AppCompatActivity {
     private static final String LOCAL_NETWORK_PERMISSION = "android.permission.ACCESS_LOCAL_NETWORK";
     private ActivityResultLauncher<String> orderNetworkPermission;
     private String orderError = "", pendingOrderRequestId = "", pendingOrderFingerprint = "";
+    private final android.os.Handler orderStatusHandler = new android.os.Handler(android.os.Looper.getMainLooper());
+    private final Runnable orderStatusTick = this::refreshOrderStatus;
+    private boolean orderStatusFetching, orderStatusReconnecting;
+    private TextView orderConnectionView;
     private final List<PichleApi.StoreSummary> stores = new ArrayList<>();
     private final List<PichleApi.MenuItem> menu = new ArrayList<>();
     private final List<CartItem> cart = new ArrayList<>();
@@ -53,7 +57,7 @@ public class MainActivity extends AppCompatActivity {
     private boolean searching;
     private boolean orderWindowOpen, orderWindowPending, pickupWindowOpen, pickupFinishing, pickupCloseFailed;
     private final ImageLoader images = new ImageLoader();
-    private final BrandMenuFetcher brandMenus = new BrandMenuFetcher();
+    private BrandMenuFetcher brandMenus;
     private final java.util.concurrent.ExecutorService menuWorker = java.util.concurrent.Executors.newSingleThreadExecutor();
     private List<BrandMenuFetcher.Entry> placeMenu = Collections.emptyList();
     private String placeMenuStatus = "", placeTab;
@@ -98,6 +102,7 @@ public class MainActivity extends AppCompatActivity {
         PRIMARY = getColor(R.color.pichle_primary);
         SURFACE = getColor(R.color.pichle_surface);
         ON_PRIMARY = getColor(R.color.pichle_on_primary);
+        brandMenus = new BrandMenuFetcher(this);
         favorites.addAll(getPreferences(MODE_PRIVATE).getStringSet("favorites", Collections.emptySet()));
         dtOnly = getPreferences(MODE_PRIVATE).getBoolean("dtOnly", false);
         storeCache = new StoreCache(this);
@@ -458,7 +463,9 @@ public class MainActivity extends AppCompatActivity {
         Runnable done = () -> {
             cart.clear(); receipt = null; method = ""; voiceDelivered = false; arrived = false;
             pendingOrderRequestId = ""; pendingOrderFingerprint = ""; orderError = "";
-            toast("수령이 완료됐습니다."); go(OrderFlow.STORES);
+            orderStatusHandler.removeCallbacks(orderStatusTick);
+            orderStatusReconnecting = false;
+            go(OrderFlow.STORES);
         };
         if (!pickupWindowOpen) { done.run(); return; }
         pickupFinishing = true;
@@ -489,6 +496,7 @@ public class MainActivity extends AppCompatActivity {
         uxPageItems = 0; uxContentTruncated = false;
         voiceStatusView = null; navigationStatusView = null; windowStatusView = null;
         speechPlay = null; speechStop = null; optionNote = null;
+        orderConnectionView = null;
         LinearLayout root = column();
         root.setBackgroundColor(BG);
         ViewCompat.setOnApplyWindowInsetsListener(root, (view, insets) -> {
@@ -513,7 +521,7 @@ public class MainActivity extends AppCompatActivity {
         brandLp.setMarginStart(screen == OrderFlow.STORES ? 0 : dp(18));
         appbar.addView(brand, brandLp);
         if (!reducedUi() && selected != null && screen == OrderFlow.STORES && !cart.isEmpty()) {
-            Button resume = button(receipt == null ? "장바구니 " + count() : "접수 내역", false,
+            Button resume = button(receipt == null ? "장바구니 " + count() : "주문 현황", false,
                     () -> go(receipt == null ? OrderFlow.REVIEW : OrderFlow.SEND));
             appbar.addView(resume, params(dp(160), dp(52)));
         }
@@ -541,11 +549,9 @@ public class MainActivity extends AppCompatActivity {
     }
 
     private void showStores() {
-        String origin = usingCurrentLocation && !showingRecentStores ? "현재 위치 기준 · 가까운 순"
-                : showingRecentStores ? "최근 본 매장" : nearbyArea == null ? "매장 둘러보기" : nearbyArea + " 기준 · 가까운 순";
         page(!searchQuery.isEmpty() ? "\u2018" + searchQuery + "\u2019 검색 결과" : nearbyArea == null ? "매장 둘러보기"
                         : nearbyArea + (usingCurrentLocation && !showingRecentStores ? " 주변 매장" : " 매장"),
-                searching ? "검색 중입니다." : !searchQuery.isEmpty() ? origin : nearbyStatus);
+                searching ? "검색 중이에요" : null);
         LinearLayout regionRow = row();
         Button currentLocation = button("내 위치", false, this::refreshCurrentLocation);
         currentLocation.setEnabled(canFilterContent());
@@ -558,7 +564,7 @@ public class MainActivity extends AppCompatActivity {
         LinearLayout searchRow = row();
         android.widget.EditText searchBox = new android.widget.EditText(this);
         searchBox.setSingleLine(true); searchBox.setTextSize(18); searchBox.setText(searchDraft);
-        searchBox.setHint("장소 검색 (예: 스타벅스, 김밥)"); searchBox.setTextColor(INK); searchBox.setHintTextColor(MUTED);
+        searchBox.setHint("매장 검색"); searchBox.setTextColor(INK); searchBox.setHintTextColor(MUTED);
         searchBox.setImeOptions(android.view.inputmethod.EditorInfo.IME_ACTION_SEARCH);
         searchBox.setPadding(dp(14), dp(10), dp(14), dp(10));
         searchBox.addTextChangedListener(new android.text.TextWatcher() {
@@ -612,6 +618,12 @@ public class MainActivity extends AppCompatActivity {
             if (!category.equals("전체") && !category.equals("즐겨찾기") && !store.category.contains(category)) continue;
             visible.add(store);
         }
+        visible.sort((a, b) -> {
+            boolean aMenu = !fromNaver(a) || BrandMenuFetcher.supports(a.name);
+            boolean bMenu = !fromNaver(b) || BrandMenuFetcher.supports(b.name);
+            int availableFirst = Boolean.compare(bMenu, aMenu);
+            return availableFirst != 0 ? availableFirst : Integer.compare(a.distanceMeters, b.distanceMeters);
+        });
         if (stores.isEmpty()) {
             addText(content, nearbyStatus, 18, MUTED, false, 32);
             return;
@@ -641,11 +653,9 @@ public class MainActivity extends AppCompatActivity {
             addText(card, store.category + " · " + String.format(Locale.KOREA, "%.1fkm", store.distanceMeters / 1000.0), 16, MUTED, false, 8);
             boolean naver = fromNaver(store);
             addText(card, naver ? "약 " + store.driveMinutes + "분" : "총 " + (store.driveMinutes + store.waitMinutes) + "분", 30, INK, true, 26);
-            addText(card, naver ? "예상 이동시간 · 대기 정보 없음" : "이동 " + store.driveMinutes + "분 · 대기 " + store.waitMinutes + "분", 17, MUTED, false, 8);
-            addText(card, naver ? (BrandMenuFetcher.supports(store.name) ? "공식 메뉴 보기" : "길안내 가능")
-                    : store.electronicOrdering ? "전자 주문 가능" : "음성 주문", 15, PRIMARY, true, 18);
+            if (!naver) addText(card, "이동 " + store.driveMinutes + "분 · 대기 " + store.waitMinutes + "분", 17, MUTED, false, 8);
             card.addView(new View(this), new LinearLayout.LayoutParams(-1, 0, 1));
-            Button choose = button(naver && !BrandMenuFetcher.supports(store.name) ? "상세 · 길안내" : "메뉴 보기", true, () -> chooseStore(store));
+            Button choose = button(naver && !BrandMenuFetcher.supports(store.name) ? "매장 정보" : "메뉴 보기", true, () -> chooseStore(store));
             add(card, choose, 24, dp(58));
             addStoreCell(group, card, storeIndex++);
         }
@@ -709,7 +719,6 @@ public class MainActivity extends AppCompatActivity {
                 + " · " + selected.category);
         LinearLayout info = card();
         if (!selected.address.isEmpty()) addText(info, selected.address, 18, INK, false, 0);
-        addText(info, "선택한 메뉴를 주문하거나 차량 음성으로 읽어줄 수 있습니다.", 16, MUTED, false, 10);
         Button navigate = button("길안내", true, () -> {
             if (!canEditOrder() || selected == null) return;
             navigation.navigate(selected.latitude, selected.longitude, selected.name, selected.address);
@@ -747,7 +756,7 @@ public class MainActivity extends AppCompatActivity {
             LinearLayout card = card();
             card.addView(menuPhoto(entry), new LinearLayout.LayoutParams(-1, dp(150)));
             addText(card, entry.name, 21, INK, true, 12);
-            addText(card, entry.detail.isEmpty() ? "칼로리 정보 없음" : entry.detail, 16, MUTED, false, 8);
+            if (!entry.detail.isEmpty()) addText(card, entry.detail, 16, MUTED, false, 8);
             card.addView(new View(this), new LinearLayout.LayoutParams(-1, 0, 1));
             add(card, button("선택", false, () -> {
                 if (!canEditOrder()) return;
@@ -788,14 +797,14 @@ public class MainActivity extends AppCompatActivity {
 
     private void loadPlaceMenu() {
         placeMenu = Collections.emptyList(); placeTab = null;
-        if (selected == null || !BrandMenuFetcher.supports(selected.name)) { placeMenuStatus = ""; return; }
-        placeMenuStatus = "공식 메뉴를 불러오는 중입니다.";
         final int request = ++placeMenuRequest;
+        if (selected == null || !BrandMenuFetcher.supports(selected.name)) { placeMenuStatus = ""; return; }
+        placeMenuStatus = "메뉴를 불러오고 있어요";
         final String name = selected.name;
         menuWorker.execute(() -> {
             List<BrandMenuFetcher.Entry> loaded = Collections.emptyList(); String error = "";
             try { loaded = brandMenus.load(name); }
-            catch (Exception e) { error = e.getMessage() == null ? "메뉴를 불러오지 못했습니다." : e.getMessage(); }
+            catch (Exception e) { error = "메뉴를 불러오지 못했어요"; }
             final List<BrandMenuFetcher.Entry> result = loaded; final String message = error;
             runOnUiThread(() -> {
                 if (destroyed || request != placeMenuRequest) return;
@@ -809,8 +818,7 @@ public class MainActivity extends AppCompatActivity {
 
     private void showMenu() {
         if (fromNaver(selected)) { showPlaceDetail(); return; }
-        page(selected.name, "이동 " + selected.driveMinutes + "분 · 대기 " + selected.waitMinutes + "분"
-                + " · " + (selected.electronicOrdering ? "전자 주문 가능" : "음성 주문"));
+        page(selected.name, null);
         LinearLayout group = itemGroup();
         for (PichleApi.MenuItem item : menu) {
             if (!claimContentItem("menu:" + selected.id + ":" + item.id)) break;
@@ -830,7 +838,7 @@ public class MainActivity extends AppCompatActivity {
     }
 
     private void showOptions() {
-        page(draftMenu.name, priced() ? money(draftMenu.priceKrw) : "가격 정보 없음");
+        page(draftMenu.name, priced() ? money(draftMenu.priceKrw) : null);
         LinearLayout options = card(); options.addView(text("옵션", 21, INK, true));
         for (String raw : draftMenu.optionSchema.split(",")) {
             String choice = raw.trim(); if (choice.isEmpty()) continue;
@@ -887,7 +895,7 @@ public class MainActivity extends AppCompatActivity {
     }
 
     private void showReview() {
-        page("장바구니", selected.name);
+        page("담은 메뉴를 확인해주세요", selected.name);
         if (cart.isEmpty()) {
             addText(content, "담은 메뉴가 없습니다.", 21, MUTED, false, 20);
             footerAction("메뉴 보기", true, true, () -> go(OrderFlow.MENU)); return;
@@ -911,7 +919,7 @@ public class MainActivity extends AppCompatActivity {
         addContentLimitNotice(content);
         if (receipt == null) add(content, button("+ 메뉴 추가", false, () -> go(OrderFlow.MENU)), 16, dp(54));
         if (priced()) addTotal(content);
-        if (receipt != null) footerAction("접수 내역 보기", true, true, () -> go(OrderFlow.SEND));
+        if (receipt != null) footerAction("주문 현황 보기", true, true, () -> go(OrderFlow.SEND));
         else footerChoices("길안내", this::startTravel, "주문하기", () -> {
             arrived = false;
             openOrder();
@@ -926,50 +934,121 @@ public class MainActivity extends AppCompatActivity {
 
     private void showMethod() {
         if (cart.isEmpty()) { go(OrderFlow.REVIEW); return; }
-        page("주문 방법", selected.name + " · " + count() + "개" + (priced() ? " · " + money(total()) : ""));
+        page("어떻게 주문할까요?", selected.name);
         LinearLayout group = itemGroup();
         LinearLayout electronic = card();
-        electronic.addView(text("매장으로 전송", 28, INK, true));
-        addText(electronic, "주문을 전송하고 수령 코드를 받습니다.", 18, MUTED, false, 14);
-        add(electronic, button("주문 전송 화면으로", true, () -> { method = "electronic"; go(OrderFlow.SEND); }), 32, dp(68));
+        electronic.addView(text("앱으로 주문", 28, INK, true));
+        add(electronic, button("주문 확인하기", true, () -> { method = "electronic"; go(OrderFlow.SEND); }), 32, dp(68));
         addGrouped(group, electronic);
         LinearLayout voice = card(); voice.addView(text("음성으로 주문", 28, INK, true));
-        addText(voice, "주문대에서 차량 스피커로 읽어줍니다.", 18, MUTED, false, 14);
         add(voice, button("음성으로 주문하기", false, () -> { method = "voice"; go(OrderFlow.VOICE); }), 32, dp(68));
         addGrouped(group, voice); content.addView(group);
     }
 
     private void showSend() {
         if (cart.isEmpty()) { go(OrderFlow.REVIEW); return; }
-        if (receipt != null && "CANCELLED".equals(receipt.status)) {
-            page("취소된 주문", selected.name);
-            addText(content, "이 주문은 취소되었습니다.", 24, INK, true, 12);
-            addText(content, "수령 코드  " + receipt.pickupCode, 24, MUTED, false, 16);
-            orderSummary(content);
-            footerAction("새로 주문하기", true, true, () -> {
-                receipt = null; orderError = "";
-                pendingOrderRequestId = ""; pendingOrderFingerprint = "";
-                go(OrderFlow.REVIEW);
-            });
-            return;
-        }
-        page(receipt == null ? "주문 전송" : "주문 접수 완료", selected.name);
+        page(receipt != null ? orderStatusTitle() : submitting ? "주문을 보내고 있어요" : "주문을 확인해주세요", selected.name);
         if (receipt != null) {
-            LinearLayout result = card();
-            result.addView(text("수령 코드", 19, MUTED, false));
-            addText(result, receipt.pickupCode, 52, INK, true, 12);
-            addText(result, "수령 창구에서 코드를 보여주세요.", 18, MUTED, false, 18);
-            content.addView(result);
+            addOrderStatusCard(content, false);
             orderSummary(content); if (priced()) addTotal(content);
-            footerAction("매장으로 이동", true, true, () -> go(OrderFlow.TRAVEL));
+            if ("CANCELLED".equals(receipt.status)) {
+                footerAction("다시 주문하기", true, true, () -> {
+                    receipt = null; orderError = ""; orderStatusReconnecting = false;
+                    pendingOrderRequestId = ""; pendingOrderFingerprint = "";
+                    go(OrderFlow.REVIEW);
+                });
+            } else if ("COMPLETED".equals(receipt.status)) {
+                footerAction("확인", true, !pickupFinishing, this::completePickup);
+            } else if ("READY".equals(receipt.status)) {
+                footerAction("수령하기", true, true, () -> go(OrderFlow.PICKUP));
+            } else footerAction("매장으로 이동", true, true, () -> go(OrderFlow.TRAVEL));
         } else {
-            LinearLayout target = card();
-            target.addView(text(selected.name + "에 보낼 주문", 23, INK, true)); content.addView(target);
             orderSummary(content); if (priced()) addTotal(content);
-            if (submitting) addText(content, "주문 전송 중…", 20, MUTED, false, 20);
             if (!orderError.isEmpty()) addText(content, orderError, 18, INK, false, 16);
-            footerAction(submitting ? "전송 중…" : (priced() ? money(total()) + "  " : "") + "주문 전송", true, !submitting, this::submitOrder);
+            footerAction(submitting ? "보내는 중…" : (priced() ? money(total()) + "  " : "") + "주문하기", true, !submitting, this::submitOrder);
         }
+    }
+
+    private String orderStatusTitle() {
+        switch (receipt.status) {
+            case "PREPARING": return "주문이 접수됐어요";
+            case "READY": return "주문하신 메뉴가 준비됐어요";
+            case "COMPLETED": return "수령이 완료됐어요";
+            case "CANCELLED": return "주문이 취소됐어요";
+            default: return "매장에서 주문을 확인하고 있어요";
+        }
+    }
+
+    private String orderStatusMessage() {
+        switch (receipt.status) {
+            case "PREPARING": return "매장에서 메뉴를 준비하고 있어요.";
+            case "READY": return "수령 코드를 매장에 보여주세요.";
+            case "COMPLETED": return "";
+            case "CANCELLED": return "주문 내역을 확인해주세요.";
+            default: return "잠시만 기다려주세요.";
+        }
+    }
+
+    private void addOrderStatusCard(LinearLayout parent, boolean includeTitle) {
+        LinearLayout status = card();
+        if (includeTitle) status.addView(text(orderStatusTitle(), 24, INK, true));
+        String message = orderStatusMessage();
+        if (!message.isEmpty()) addText(status, message, 22, INK, true, includeTitle ? 12 : 0);
+        if (!"CANCELLED".equals(receipt.status)) {
+            int step = "RECEIVED".equals(receipt.status) ? 0 : "PREPARING".equals(receipt.status) ? 1 : 2;
+            LinearLayout steps = row();
+            String[] labels = {"주문 확인", "메뉴 준비", "준비 완료"};
+            for (int i = 0; i < labels.length; i++) {
+                TextView label = text(labels[i], 17, i <= step ? PRIMARY : MUTED, i <= step);
+                label.setGravity(Gravity.CENTER);
+                steps.addView(label, new LinearLayout.LayoutParams(0, dp(44), 1));
+            }
+            add(status, steps, 18, -2);
+        }
+        addText(status, "수령 코드", 17, MUTED, false, 22);
+        addText(status, receipt.pickupCode, 46, INK, true, 12);
+        orderConnectionView = addText(status, "주문 상태를 다시 확인하고 있어요", 16, MUTED, false, 16);
+        orderConnectionView.setVisibility(orderStatusReconnecting ? View.VISIBLE : View.GONE);
+        parent.addView(status);
+    }
+
+    private boolean shouldCheckOrderStatus() {
+        return foreground && !destroyed && receipt != null && ordersClient != null
+                && !"COMPLETED".equals(receipt.status) && !"CANCELLED".equals(receipt.status);
+    }
+
+    private void scheduleOrderStatus(long delay) {
+        orderStatusHandler.removeCallbacks(orderStatusTick);
+        if (shouldCheckOrderStatus()) orderStatusHandler.postDelayed(orderStatusTick, delay);
+    }
+
+    private void refreshOrderStatus() {
+        if (!shouldCheckOrderStatus() || orderStatusFetching) return;
+        final String orderId = receipt.orderId;
+        orderStatusFetching = true;
+        orderWorker.execute(() -> {
+            PichleApi.OrderReceipt fetched = null;
+            try { fetched = ordersClient.getOrderStatus(orderId); }
+            catch (java.io.IOException | RuntimeException ignored) { }
+            final PichleApi.OrderReceipt result = fetched;
+            runOnUiThread(() -> {
+                orderStatusFetching = false;
+                if (destroyed) return;
+                if (receipt == null || !orderId.equals(receipt.orderId)) { scheduleOrderStatus(0); return; }
+                orderStatusReconnecting = result == null;
+                if (result != null) {
+                    boolean changed = !receipt.status.equals(result.status) || !receipt.pickupCode.equals(result.pickupCode);
+                    receipt = result;
+                    if (foreground && changed) {
+                        if (screen == OrderFlow.SEND || screen == OrderFlow.TRAVEL || screen == OrderFlow.PICKUP) render();
+                        else toast(orderStatusTitle());
+                    }
+                }
+                if (foreground && orderConnectionView != null)
+                    orderConnectionView.setVisibility(orderStatusReconnecting ? View.VISIBLE : View.GONE);
+                scheduleOrderStatus(3000);
+            });
+        });
     }
 
     private void submitOrder() {
@@ -1016,18 +1095,19 @@ public class MainActivity extends AppCompatActivity {
                 if (destroyed) return;
                 submitting = false;
                 if (result != null) {
-                    receipt = result; orderError = "";
+                    receipt = result; orderError = ""; orderStatusReconnecting = false;
                     pendingOrderRequestId = ""; pendingOrderFingerprint = "";
                 }
                 else orderError = message;
                 if (foreground) render();
+                scheduleOrderStatus(1000);
             });
         });
     }
 
     private void showVoice() {
         if (cart.isEmpty()) { go(OrderFlow.REVIEW); return; }
-        page("음성 주문", selected.name + (arrived ? " · 주문대 도착" : " · 주문 문장 확인"));
+        page("주문 내용을 읽어드릴게요", selected.name);
         LinearLayout player = card();
         player.addView(text("주문 읽어주기", 28, INK, true));
         voiceStatusView = text(voiceStatus, 18, MUTED, false); add(player, voiceStatusView, 10, -2);
@@ -1043,7 +1123,6 @@ public class MainActivity extends AppCompatActivity {
         phrase.addView(text("주문 내용", 19, MUTED, true));
         TextView spoken = addText(phrase, orderText(), 26, INK, true, 18);
         spoken.setLineSpacing(dp(8), 1); add(content, phrase, 16, -2);
-        addText(content, "정차 후 재생해주세요.", 16, MUTED, false, 16);
         footerAction("수령하기", false, true, () -> {
             voiceDelivered = true;
             go(OrderFlow.PICKUP);
@@ -1075,7 +1154,7 @@ public class MainActivity extends AppCompatActivity {
     }
 
     private void showTravel() {
-        page("매장으로 이동", selected.name);
+        page("매장으로 이동해요", selected.name);
         LinearLayout destination = card();
         destination.addView(text(selected.name, 27, INK, true));
         addText(destination, selected.address, 17, MUTED, false, 10);
@@ -1084,12 +1163,13 @@ public class MainActivity extends AppCompatActivity {
         navigationStatusView = text(navigationStatus, 17, MUTED, false);
         add(destination, navigationStatusView, 14, -2); content.addView(destination);
         if (receipt != null) {
-            LinearLayout accepted = card();
-            accepted.addView(text("접수 번호  " + receipt.pickupCode, 24, INK, true));
-            addText(accepted, count() + "개" + (priced() ? " · " + money(total()) : ""), 17, MUTED, false, 10);
-            add(content, accepted, 16, -2);
-        } else {
-            addText(content, "주문대에 도착하면 주문하기를 눌러 주세요. 창문이 열리고 주문 음성이 나옵니다.", 18, MUTED, false, 20);
+            addOrderStatusCard(content, true);
+            footerChoices("길안내", this::navigateToSelectedStore,
+                    "READY".equals(receipt.status) ? "수령하기" : "주문 현황", () -> {
+                arrived = true;
+                go("READY".equals(receipt.status) ? OrderFlow.PICKUP : OrderFlow.SEND);
+            });
+            return;
         }
         footerChoices("길안내", this::navigateToSelectedStore,
                 receipt == null && !voiceDelivered ? "주문하기" : "수령하기", () -> {
@@ -1101,15 +1181,14 @@ public class MainActivity extends AppCompatActivity {
 
     private void showPickup() {
         if (cart.isEmpty()) { go(OrderFlow.STORES); return; }
-        page("상품 수령", selected.name);
+        if (receipt != null && !"READY".equals(receipt.status)) { showSend(); return; }
+        page("메뉴를 받아주세요", selected.name);
         if (receipt != null) {
-            LinearLayout code = card(); code.addView(text("접수 번호", 18, MUTED, false));
-            addText(code, receipt.pickupCode, 44, INK, true, 10); content.addView(code);
+            addOrderStatusCard(content, false);
         }
         LinearLayout window = card();
         window.addView(text("운전석 창문", 24, INK, true));
-        addText(window, "수령 창구에 정차한 후 눌러주세요. 수령 완료를 누르면 창문이 닫힙니다.", 18, MUTED, false, 12);
-        add(window, button("수령 · 창문 열기", true, this::openPickupWindow), 24, dp(76));
+        add(window, button("창문 열기", true, this::openPickupWindow), 24, dp(76));
         windowStatusView = text(windowStatus, 17, MUTED, false); add(window, windowStatusView, 14, -2);
         add(content, window, receipt == null ? 0 : 16, -2);
         orderSummary(content);
@@ -1268,7 +1347,8 @@ public class MainActivity extends AppCompatActivity {
         ArrayList<Bundle> savedCart = state.getParcelableArrayList("cart");
         if (selected != null && savedCart != null) for (Bundle item : savedCart) cart.add(CartItem.from(item));
         String orderId = state.getString("orderId");
-        if (orderId != null && selected != null && !cart.isEmpty()) receipt = new PichleApi.OrderReceipt(orderId, "RECEIVED", state.getString("pickupCode", ""));
+        if (orderId != null && selected != null && !cart.isEmpty()) receipt = new PichleApi.OrderReceipt(orderId,
+                state.getString("orderStatus", "RECEIVED"), state.getString("pickupCode", ""));
         method = state.getString("method", ""); category = state.getString("category", "전체");
         arrived = state.getBoolean("arrived"); voiceDelivered = state.getBoolean("voiceDelivered");
         for (PichleApi.MenuItem item : menu) if (item.id.equals(state.getString("draftId"))) draftMenu = item;
@@ -1295,7 +1375,10 @@ public class MainActivity extends AppCompatActivity {
         }
         ArrayList<Bundle> items = new ArrayList<>(); for (CartItem item : cart) items.add(item.save());
         state.putParcelableArrayList("cart", items);
-        if (receipt != null) { state.putString("orderId", receipt.orderId); state.putString("pickupCode", receipt.pickupCode); }
+        if (receipt != null) {
+            state.putString("orderId", receipt.orderId); state.putString("pickupCode", receipt.pickupCode);
+            state.putString("orderStatus", receipt.status);
+        }
         state.putString("method", method); state.putString("category", category);
         state.putBoolean("arrived", arrived); state.putBoolean("voiceDelivered", voiceDelivered);
         if (draftMenu != null) state.putString("draftId", draftMenu.id);
@@ -1315,11 +1398,13 @@ public class MainActivity extends AppCompatActivity {
         if (uxGate != null) { uxState = uxGate.getState(); uxGate.start(); }
         render();
         if (!reducedUi()) startNearby();
+        scheduleOrderStatus(0);
     }
 
     @Override protected void onStop() {
         saveDraftNote();
         foreground = false;
+        orderStatusHandler.removeCallbacks(orderStatusTick);
         if (speech != null) speech.stop();
         if (storeChangeDialog != null) { storeChangeDialog.dismiss(); storeChangeDialog = null; }
         if (uxGate != null) { uxGate.stop(); uxState = uxGate.getState(); }
@@ -1328,6 +1413,7 @@ public class MainActivity extends AppCompatActivity {
 
     @Override protected void onDestroy() {
         destroyed = true;
+        orderStatusHandler.removeCallbacks(orderStatusTick);
         orderWorker.shutdown();
         if (uxGate != null) uxGate.close();
         if (nearby != null) nearby.close();

@@ -46,6 +46,17 @@ def list_orders(
     return repository.list_orders(storeId.strip() or None if storeId else None, status, limit, offset)
 
 
+@router.get("/orders/{order_id}/status", dependencies=[Depends(require_app_key)])
+def get_order_status(order_id: UUID, repository: Repository, response: Response):
+    record = repository.get(str(order_id))
+    response.headers["Cache-Control"] = "no-store"
+    return {
+        "orderId": record["orderId"],
+        "status": record["status"],
+        "pickupCode": record["pickupCode"],
+    }
+
+
 @router.get("/orders/{order_id}", response_model=OrderRecord, dependencies=[Depends(require_manager)])
 def get_order(order_id: UUID, repository: Repository):
     return repository.get(str(order_id))

@@ -1,5 +1,8 @@
 package ooo.ionya.driveaway;
 
+import android.content.Context;
+import android.security.NetworkSecurityPolicy;
+
 import org.json.JSONArray;
 import org.json.JSONException;
 import org.json.JSONObject;
@@ -7,50 +10,35 @@ import org.json.JSONObject;
 import java.io.ByteArrayOutputStream;
 import java.io.IOException;
 import java.io.InputStream;
-import java.io.OutputStream;
 import java.net.HttpURLConnection;
+import java.net.SocketTimeoutException;
+import java.net.URI;
 import java.net.URL;
 import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
 import java.util.Collections;
-import java.util.HashMap;
-import java.util.HashSet;
 import java.util.List;
-import java.util.Map;
+import java.util.Locale;
 
-/**
- * Reads the menu each brand publishes on its own site (read-only; nothing can be ordered).
- * Both sites expose names and nutrition but no prices. Call on a worker thread.
- */
+/** Reads brand menus through the Pichle server. Cache lifetime belongs to the server. */
 public final class BrandMenuFetcher implements AutoCloseable {
     public static final class Entry {
         public final String section, name, detail;
         public final boolean drink;
         public final String imageUrl;
         Entry(String section, String name, String detail, boolean drink, String imageUrl) {
-            this.section = section; this.name = name; this.detail = detail; this.drink = drink; this.imageUrl = imageUrl;
+            this.section = section; this.name = name; this.detail = detail;
+            this.drink = drink; this.imageUrl = imageUrl;
         }
     }
 
-    private static final String STARBUCKS = "https://www.starbucks.co.kr/menu/productListAjax.do";
-    private static final String MCDONALDS = "https://www.mcdonalds.co.kr/api/v1/kor/product/product/list?page=1&view_rows=200&mainCategory=";
-    // {category code, tab label, "d" for drinks / "f" for food}
-    private static final String[][] STARBUCKS_SECTIONS = {
-            {"W0000171", "콜드 브루", "d"}, {"W0000060", "브루드 커피", "d"}, {"W0000003", "에스프레소", "d"},
-            {"W0000004", "프라푸치노", "d"}, {"W0000005", "블렌디드", "d"}, {"W0000422", "리프레셔", "d"},
-            {"W0000061", "피지오", "d"}, {"W0000075", "티", "d"}, {"W0000053", "기타 음료", "d"},
-            {"W0000062", "주스", "d"}, {"W0000013", "브레드", "f"}, {"W0000032", "케이크", "f"},
-            {"W0000033", "샌드위치", "f"}, {"W0000055", "과일 & 요거트", "f"}, {"W0000056", "스낵 & 디저트", "f"},
-            {"W0000064", "아이스크림", "f"}};
-    private static final Object[][] MCDONALDS_SECTIONS = {{1, "버거", false}, {7, "맥런치", false},
-            {2, "맥모닝", false}, {8, "해피 스낵", false}, {4, "사이드 & 디저트", false},
-            {3, "해피밀", false}, {5, "맥카페 & 음료", true}};
     private static final int MAX_BYTES = 2 * 1024 * 1024;
-    private static final long TTL_NANOS = 30L * 60 * 1_000_000_000;
-
-    private final Map<String, Cached> cache = new HashMap<>();
+    private static final int MAX_ITEMS = 2000;
+    private final DillOrderClient server;
     private volatile HttpURLConnection active;
     private volatile boolean closed;
+
+    public BrandMenuFetcher(Context context) { server = new DillOrderClient(context); }
 
     public static boolean supports(String storeName) { return brand(storeName) != null; }
 
@@ -61,108 +49,116 @@ public final class BrandMenuFetcher implements AutoCloseable {
         return null;
     }
 
+    /** Blocking worker-thread call; every load asks our server rather than a local menu cache. */
     public List<Entry> load(String storeName) throws IOException {
+        ensureOpen();
         String brand = brand(storeName);
         if (brand == null) return Collections.emptyList();
-        Cached cached = cache.get(brand);
-        if (cached != null && System.nanoTime() - cached.created < TTL_NANOS) return cached.entries;
-        List<Entry> entries = "starbucks".equals(brand) ? starbucks() : mcdonalds();
-        if (entries.isEmpty()) throw new IOException("공식 사이트에서 메뉴를 찾지 못했습니다.");
-        cache.put(brand, new Cached(entries));
-        return entries;
-    }
-
-    private List<Entry> starbucks() throws IOException {
-        List<Entry> out = new ArrayList<>();
-        for (String[] section : STARBUCKS_SECTIONS) {
-            JSONArray list = parse(request(STARBUCKS, "CATE_CD=" + section[0])).optJSONArray("list");
-            if (list == null) continue;
-            HashSet<String> seen = new HashSet<>();
-            for (int i = 0; i < list.length(); i++) {
-                JSONObject item = list.optJSONObject(i);
-                if (item == null || "Y".equals(item.optString("sold_OUT"))) continue;
-                String name = clean(item.optString("product_NM"));
-                if (name.isEmpty() || !seen.add(name)) continue;
-                out.add(new Entry(section[1], name, kcal(item.optString("kcal")), "d".equals(section[2]),
-                        imageUrl(item.optString("img_UPLOAD_PATH"), item.optString("file_PATH"))));
-            }
-        }
-        return out;
-    }
-
-    private List<Entry> mcdonalds() throws IOException {
-        List<Entry> out = new ArrayList<>();
-        for (Object[] section : MCDONALDS_SECTIONS) {
-            JSONObject root = parse(request(MCDONALDS + section[0], null)).optJSONObject("resultObject");
-            JSONArray list = root == null ? null : root.optJSONArray("list");
-            if (list == null) continue;
-            HashSet<String> seen = new HashSet<>();
-            for (int i = 0; i < list.length(); i++) {
-                JSONObject item = list.optJSONObject(i);
-                if (item == null || !"Y".equals(item.optString("status", "Y"))) continue;
-                String name = clean(item.optString("korName"));
-                if (name.isEmpty() || !seen.add(name)) continue;
-                out.add(new Entry((String) section[1], name, kcal(item.optString("calorie")), (Boolean) section[2],
-                        imageUrl("https://www.mcdonalds.co.kr", item.optString("pcImageUrl"))));
-            }
-        }
-        return out;
-    }
-
-    /** Absolute https URL on a known brand host, or empty. The path is percent-encoded (brackets, Korean). */
-    private static String imageUrl(String base, String path) {
-        if (base == null || path == null || path.trim().isEmpty()) return "";
-        String url = base.trim().replaceAll("/+$", "") + android.net.Uri.encode(path.trim().startsWith("/") ? path.trim() : "/" + path.trim(), "/");
-        return ImageLoader.allowed(url) ? url : "";
-    }
-
-    private static String kcal(String value) {
-        String v = value == null ? "" : value.trim();
-        return v.matches("[0-9]+(\\.[0-9]+)?") && !v.equals("0") ? v.replaceAll("\\.0+$", "") + "kcal" : "";
-    }
-
-    private static String clean(String html) {
-        return html.replaceAll("<[^>]*>", "").replace("&amp;", "&").replace("&nbsp;", " ")
-                .replaceAll("\\s+", " ").trim();
-    }
-
-    private static JSONObject parse(String body) throws IOException {
-        try { return new JSONObject(body); }
-        catch (JSONException error) { throw new IOException("공식 사이트의 메뉴 형식을 읽지 못했습니다."); }
-    }
-
-    private String request(String url, String formBody) throws IOException {
-        if (closed || Thread.currentThread().isInterrupted()) throw new IOException("메뉴 조회가 취소되었습니다.");
-        HttpURLConnection connection = (HttpURLConnection) new URL(url).openConnection();
-        active = connection;
+        String baseUrl = server.getBaseUrl();
+        URI address = URI.create(baseUrl);
+        if ("http".equalsIgnoreCase(address.getScheme())
+                && !NetworkSecurityPolicy.getInstance().isCleartextTrafficPermitted(address.getHost()))
+            throw new MenuException("이 주소는 HTTPS로 연결해주세요.");
+        HttpURLConnection connection = null;
         try {
-            connection.setConnectTimeout(10_000);
-            connection.setReadTimeout(15_000);
+            connection = (HttpURLConnection) new URL(baseUrl + "/v1/menus/" + brand).openConnection();
+            active = connection;
+            ensureOpen();
+            connection.setConnectTimeout(8_000);
+            connection.setReadTimeout(30_000);
             connection.setInstanceFollowRedirects(false);
+            connection.setUseCaches(false);
+            connection.setRequestMethod("GET");
             connection.setRequestProperty("Accept", "application/json");
-            connection.setRequestProperty("Accept-Language", "ko-KR,ko;q=0.9");
-            if (formBody != null) {
-                connection.setRequestMethod("POST");
-                connection.setDoOutput(true);
-                connection.setRequestProperty("Content-Type", "application/x-www-form-urlencoded; charset=UTF-8");
-                try (OutputStream out = connection.getOutputStream()) { out.write(formBody.getBytes(StandardCharsets.UTF_8)); }
-            }
+            connection.setRequestProperty("X-API-Key", DillOrderClient.APP_API_KEY);
             int status = connection.getResponseCode();
-            if (status != 200) throw new IOException("공식 사이트에 연결하지 못했습니다. (HTTP " + status + ")");
-            try (InputStream in = connection.getInputStream(); ByteArrayOutputStream out = new ByteArrayOutputStream()) {
-                byte[] buffer = new byte[8192];
-                int count;
-                while ((count = in.read(buffer)) != -1) {
-                    if (closed || Thread.currentThread().isInterrupted()) throw new IOException("메뉴 조회가 취소되었습니다.");
-                    if (out.size() + count > MAX_BYTES) throw new IOException("메뉴 응답이 너무 큽니다.");
-                    out.write(buffer, 0, count);
-                }
-                return out.toString(StandardCharsets.UTF_8.name());
-            }
+            if (status != 200) throw statusError(status);
+            String contentType = connection.getContentType();
+            if (contentType == null || !contentType.toLowerCase(Locale.ROOT).contains("application/json"))
+                throw formatError();
+            String body;
+            try (InputStream stream = connection.getInputStream()) { body = readResponse(stream); }
+            ensureOpen();
+            return parse(body, brand);
+        } catch (SocketTimeoutException error) {
+            throw new MenuException("메뉴를 불러오는 데 시간이 걸리고 있습니다. 잠시 후 다시 시도해주세요.", error);
+        } catch (IOException error) {
+            if (error instanceof MenuException) throw error;
+            ensureOpen();
+            throw new MenuException("메뉴를 불러오지 못했습니다. 서버 연결을 확인해주세요.", error);
         } finally {
-            connection.disconnect();
+            if (connection != null) connection.disconnect();
             if (active == connection) active = null;
         }
+    }
+
+    private List<Entry> parse(String body, String brand) throws IOException {
+        try {
+            JSONObject root = new JSONObject(body);
+            if (!brand.equals(requiredText(root, "brand", 40, false))) throw formatError();
+            Object rawItems = root.opt("items");
+            if (!(rawItems instanceof JSONArray)) throw formatError();
+            JSONArray items = (JSONArray) rawItems;
+            if (items.length() == 0) throw new MenuException("현재 표시할 메뉴가 없습니다.");
+            if (items.length() > MAX_ITEMS) throw formatError();
+            List<Entry> entries = new ArrayList<>(items.length());
+            for (int i = 0; i < items.length(); i++) {
+                ensureOpen();
+                Object value = items.opt(i);
+                if (!(value instanceof JSONObject)) throw formatError();
+                JSONObject item = (JSONObject) value;
+                String section = requiredText(item, "section", 100, false);
+                String name = requiredText(item, "name", 300, false);
+                String detail = requiredText(item, "detail", 2000, true);
+                String image = requiredText(item, "imageUrl", 4096, true);
+                Object drink = item.opt("drink");
+                if (!(drink instanceof Boolean)) throw formatError();
+                entries.add(new Entry(section, name, detail, (Boolean) drink,
+                        ImageLoader.allowed(image) ? image : ""));
+            }
+            return Collections.unmodifiableList(entries);
+        } catch (JSONException error) {
+            throw new MenuException("메뉴 응답을 읽지 못했습니다. 잠시 후 다시 시도해주세요.", error);
+        }
+    }
+
+    private static String requiredText(JSONObject object, String key, int maxLength, boolean emptyAllowed)
+            throws IOException {
+        Object value = object.opt(key);
+        if (!(value instanceof String)) throw formatError();
+        String text = ((String) value).trim();
+        if (text.length() > maxLength || (!emptyAllowed && text.isEmpty())) throw formatError();
+        return text;
+    }
+
+    private String readResponse(InputStream stream) throws IOException {
+        if (stream == null) throw formatError();
+        try (ByteArrayOutputStream output = new ByteArrayOutputStream()) {
+            byte[] buffer = new byte[8192];
+            int count;
+            while ((count = stream.read(buffer)) != -1) {
+                ensureOpen();
+                if (output.size() + count > MAX_BYTES) throw formatError();
+                output.write(buffer, 0, count);
+            }
+            return output.toString(StandardCharsets.UTF_8.name());
+        }
+    }
+
+    private void ensureOpen() throws IOException {
+        if (closed || Thread.currentThread().isInterrupted()) throw new MenuException("메뉴 조회가 취소되었습니다.");
+    }
+
+    private static IOException statusError(int status) {
+        if (status == 401 || status == 403) return new MenuException("메뉴 조회 권한을 확인해주세요.");
+        if (status == 404 || (status >= 300 && status < 400))
+            return new MenuException("주문 서버의 메뉴 주소를 확인해주세요.");
+        if (status == 429) return new MenuException("메뉴 조회가 몰리고 있습니다. 잠시 후 다시 시도해주세요.");
+        return new MenuException("메뉴를 불러오지 못했습니다. 잠시 후 다시 시도해주세요.");
+    }
+
+    private static IOException formatError() {
+        return new MenuException("메뉴 응답을 읽지 못했습니다. 잠시 후 다시 시도해주세요.");
     }
 
     @Override public void close() {
@@ -171,8 +167,8 @@ public final class BrandMenuFetcher implements AutoCloseable {
         if (connection != null) connection.disconnect();
     }
 
-    private static final class Cached {
-        final List<Entry> entries; final long created = System.nanoTime();
-        Cached(List<Entry> entries) { this.entries = Collections.unmodifiableList(entries); }
+    private static final class MenuException extends IOException {
+        MenuException(String message) { super(message); }
+        MenuException(String message, Throwable cause) { super(message, cause); }
     }
 }
