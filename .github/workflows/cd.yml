@@ -47,10 +47,11 @@ jobs:
         run: |
           set -euo pipefail
           docker build \
+            --file "${GITHUB_WORKSPACE}/dill/Dockerfile" \
             -t "pichle:${GITHUB_SHA}" \
             -t pichle:latest \
             --build-arg "APP_COMMIT=${GITHUB_SHA}" \
-            ./dill
+            "${GITHUB_WORKSPACE}/dill"
           echo "BUILD_COMMIT_AT=$(git show -s --format=%cI HEAD)" >> "$GITHUB_ENV"
           echo "BUILD_AT=$(date --iso-8601=seconds)" >> "$GITHUB_ENV"
 
