@@ -1,0 +1,15 @@
+.git
+.github
+.idea
+.venv
+__pycache__
+**/__pycache__
+*.py[cod]
+.env
+.env.*
+config.yml
+config.*.yml
+logs
+data
+*.log*
+*.sqlite3*

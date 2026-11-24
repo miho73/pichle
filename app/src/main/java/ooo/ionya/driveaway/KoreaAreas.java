@@ -35,6 +35,21 @@ final class KoreaAreas {
 
     private static final double MAX_METERS = 25_000;
 
+    static String[] names() {
+        String[] names = new String[AREAS.length];
+        for (int i = 0; i < AREAS.length; i++) names[i] = (String) AREAS[i][0];
+        return names;
+    }
+
+    /** A browsing origin, never a replacement for the vehicle's measured location. */
+    static double[] center(String name) {
+        if (name == null) return null;
+        for (Object[] area : AREAS) {
+            if (area[0].equals(name.trim())) return new double[]{(Double) area[1], (Double) area[2]};
+        }
+        return null;
+    }
+
     /** Nearest known area within 25 km, or null (e.g. the device is outside Korea). */
     static String nearest(double lat, double lon) {
         String best = null; double bestMeters = MAX_METERS;

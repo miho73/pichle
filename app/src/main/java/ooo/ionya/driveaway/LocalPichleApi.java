@@ -3,9 +3,8 @@ package ooo.ionya.driveaway;
 import java.util.Arrays;
 import java.util.List;
 
-/** Local-only stand-in for the Pichle backend, so the end-to-end demo works offline. */
+/** Local catalog retained for stores with an embedded menu. Orders use DillOrderClient. */
 public final class LocalPichleApi implements PichleApi {
-    private int nextOrder = 104;
 
     @Override public List<StoreSummary> findNearbyStores(String coarseAreaId) {
         return Arrays.asList(
@@ -50,8 +49,8 @@ public final class LocalPichleApi implements PichleApi {
                 new MenuItem("vanilla-latte", "바닐라 라떼", 5500, "시럽 적게, 디카페인"));
     }
 
-    @Override public OrderReceipt submitOrder(OrderRequest request) {
-        return new OrderReceipt("PICHLE-" + nextOrder, "RECEIVED", "P-" + nextOrder++);
+    @Override public OrderReceipt submitOrder(OrderRequest request) throws java.io.IOException {
+        throw new java.io.IOException("주문 서버를 통해 전송해주세요.");
     }
 
     @Override public void submitVisitSignal(VisitSignal signal) {

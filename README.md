@@ -7,7 +7,19 @@
 
 Pichle은 차량 정보를 활용한 드라이브스루 혼잡도 추정, 차내 키오스크, TTS 주문을 통해 이동 중 구매 경험을 연결하는 프로젝트입니다. 매장까지의 이동시간과 예상 대기시간을 함께 비교하고, 차내 화면에서 메뉴를 준비해 매장의 주문 방식에 맞게 전달하는 것을 목표로 합니다.
 
-이 저장소는 **Android MVP**입니다. 매장·메뉴·가격·대기시간·주문 접수는 로컬 샘플 데이터로 동작하며, 길안내·음성 출력·창문 제어는 실제 Pleos SDK를 호출합니다. 아래에서는 계획서의 서비스 구상과 현재 구현 범위를 함께 설명합니다.
+이 저장소는 **Android 앱과 FastAPI 주문 서버로 구성된 MVP**입니다. 매장 탐색은 Pleos 위치와 네이버 지도의 실제 장소 정보를 사용하고, 길안내·음성 출력·창문 제어는 실제 Pleos SDK를 호출합니다. 앱에서 전송한 주문은 `dill` 서버가 저장하고 수령 코드를 발급하며, 매니저 웹 화면에서 주문과 처리 상태를 확인할 수 있습니다. 결제는 구현하지 않았습니다.
+
+### 주문 서버와 매니저 화면
+
+서버 실행과 앱 연결 방법은 [dill 실행 안내](dill/README.md)에 정리했습니다. `dill/config.yml`에 자체 PostgreSQL의 호스트·포트·DB 이름·계정·비밀번호와 매니저 로그인 정보를 입력합니다. 실제 설정 파일은 Git 추적에서 제외합니다. 파일이 없으면 dill README의 YAML 예제로 작성합니다.
+
+DB와 계정을 준비한 뒤 서버 기동 전에 [dill/init.sql](dill/init.sql)을 해당 DB에 직접 실행합니다. 실행 명령과 DB·계정 생성 예시는 [DB 초기화 안내](dill/README.md#db-초기화)에 있습니다. 서버는 시작할 때 테이블 준비 상태만 조회하며 자동으로 생성·변경하지 않습니다. 기존 데이터는 삭제하지 않으며 스키마 변경 마이그레이션은 수행하지 않습니다.
+
+Cloudflare가 외부 HTTPS를 처리하고 컨테이너의 FastAPI는 `0.0.0.0:8000`에서 HTTP로 실행합니다. 배포 포트는 호스트 `41001` → 컨테이너 `8000`이며, 설정 파일에 `server` 블록은 사용하지 않습니다. DB 연결은 SQLAlchemy 2 ORM과 Session을 사용하고, PostgreSQL SSL은 사용하지 않습니다.
+
+배포 워크플로는 [`.github/workflows/cd.yml`](.github/workflows/cd.yml)입니다. 호스트 `/home/server/pichle/config.yml`은 컨테이너 `/app/config.yml`에 읽기 전용으로, `/home/server/pichle/logs`는 `/app/logs`에 쓰기 가능으로 연결합니다. JSON 로그는 기본 `logs/app.log`에 저장하고 한국 시간 자정 이후 첫 기록에서 날짜별로 회전하며, 회전 파일을 최대 10개 보관합니다. 로그 폴더가 호스트에 남으므로 컨테이너를 교체해도 유지됩니다.
+
+매니저 화면은 [https://pichle.ionya.ooo/manager](https://pichle.ionya.ooo/manager), 앱의 기본 주문 서버 주소는 `https://pichle.ionya.ooo`입니다. 앱의 **Pichle 이름 7번 누르기 → 주문 서버**에서 다른 서버 주소를 저장할 수 있습니다. 매니저는 로그인 후 매장·상태별 주문 조회, 수령 코드 검색, 접수·준비·수령 상태 변경을 할 수 있습니다.
 
 ## 시연 영상
 
@@ -41,20 +53,26 @@ Pichle은 차량 정보를 활용한 드라이브스루 혼잡도 추정, 차내
 4. **매장 이동** — 차량 내비게이션으로 목적지까지 길안내를 요청합니다.
 5. **상품 수령** — 접수 내역을 확인하고 수령 창구에 정차한 뒤 창문 제어를 요청합니다.
 
-현재 앱의 화면 흐름은 `매장 목록 → 메뉴 → 옵션·수량 → 장바구니 → 주문 방법 → 주문 전송 / 음성 주문 → 이동 → 수령`입니다. 비제휴 매장은 장바구니에서 음성 주문 화면으로 바로 이어지며, 음성 재생·길안내·창문 제어는 각각 해당 단계의 화면에 배치했습니다.
+현재 앱의 화면 흐름은 `매장 목록 → 메뉴 → 옵션·수량 → 장바구니 → 주문 방법 → 주문 전송 / 음성 주문 → 수령`입니다. 장바구니의 **길안내 / 주문하기**에서 길안내를 선택할 수 있으며, 길안내 없이도 주문할 수 있습니다. 서버 전송을 선택하면 메뉴명·수량·옵션·매장 정보를 HTTP로 보내고, 실제 서버 응답의 수령 코드를 표시합니다. 응답 지연 후 같은 내용을 재전송하면 동일한 전송 ID로 기존 접수 결과를 확인합니다.
 
 ## 주요 기능과 현재 구현
 
 | 기능 | 계획서의 서비스 구상 | 현재 MVP |
 | --- | --- | --- |
-| 매장 탐색 | 주변 매장의 혼잡도와 전체 예상 소요시간 비교 | 가상 매장 목록, 이동·대기시간 합산 정렬, 카테고리 필터, 즐겨찾기 |
-| 혼잡도 추정 | 지오펜스 체류시간, 브레이크·주행 정보를 집계해 대기시간 추정 | 고정된 샘플 대기시간 표시. 수집·집계·예측 모델은 미구현 |
-| 차내 키오스크 | 메뉴·옵션 선택 후 제휴 매장으로 주문 전송 | 메뉴, 옵션, 수량, 장바구니, 로컬 접수 번호와 주문 내역 |
+| 매장 탐색 | 주변 매장의 혼잡도와 전체 예상 소요시간 비교 | 실제 장소 검색, 내 위치·선택 지역 기준 정렬, DT·카테고리 필터, 즐겨찾기 |
+| 혼잡도 추정 | 지오펜스 체류시간, 브레이크·주행 정보를 집계해 대기시간 추정 | 실제 조회 매장의 대기 정보는 미제공. 수집·집계·예측 모델은 미구현 |
+| 차내 키오스크 | 메뉴·옵션 선택 후 제휴 매장으로 주문 전송 | 메뉴·옵션·수량, HTTPS 주문 접수, Pydantic DTO·SQLAlchemy ORM·PostgreSQL 저장, 서버 수령 코드, 매니저 화면 |
 | TTS 주문 | 선택 내용을 자연어 문장으로 구성하고 현지어로 전달 | 정해진 형식으로 한국어 문장을 구성해 재생·중지. AI 문장 생성·번역은 미구현 |
 | 길안내 | 차량 내비게이션과 연계한 매장 이동 | NaviHelper로 선택한 매장 좌표의 경로 탐색·내비게이션 화면 열기 |
 | 수령 보조 | 수령 상황을 인지해 원하는 창문 제어 | 사용자가 버튼을 누르면 운전석 창문 내림 요청. 자동 정차 감지·자동 개방은 미구현 |
 
-샘플 매장은 송도 지역의 예시 목적지 좌표를 사용합니다. 매장명·메뉴·가격은 가상 데이터이며, 좌표는 실제 매장 진입로로 검증되지 않았습니다. 현재 주문은 실제 매장으로 전달되지 않으며 결제 기능도 구현하지 않았습니다.
+실제 매장 좌표는 장소 검색 결과를 사용하며, 차량 진입로 좌표로 검증되지는 않았습니다. 주문은 이 저장소의 `dill` 매니저 화면으로 전달됩니다. 기존 브랜드의 POS나 공식 주문 시스템과는 연결하지 않았습니다. 가격이 제공되지 않은 메뉴는 금액을 생성하지 않고 서버에 `null`로 전달합니다.
+
+### 위치와 매장 조회
+
+최신 Fused Location 업데이트를 최대 20초 동안 우선 수신하고, 신선한 캐시 위치는 후순위로 사용합니다. 실제 GPS 위치와 매장을 검색할 지역은 별도로 관리하며, 화면의 **내 위치**와 **지역 선택**으로 조회 기준을 바꿀 수 있습니다. 한국 지역명을 결정하지 못하거나 조회에 실패해도 최근에 조회한 실제 매장 목록을 유지하고, 저장된 지역 또는 송도동을 기준으로 실제 매장을 검색합니다. 선택 지역을 현재 GPS 위치로 대체하지 않습니다.
+
+매장 화면에서 가상 매장으로 자동 전환하거나 기술적인 오류 문구를 표시하지 않습니다. 최초 이용 중 네트워크까지 사용할 수 없다면 실제 매장 목록을 새로 만들 수 없으므로 지역을 선택할 수 있는 중립적인 화면을 표시합니다.
 
 ### Pleos에 특화된 경험
 
@@ -70,28 +88,47 @@ Pichle은 차량 정보를 활용한 드라이브스루 혼잡도 추정, 차내
 flowchart LR
     UI["차내 화면 · MainActivity"] --> API["PichleApi"]
     API --> LOCAL["LocalPichleApi · 현재 구현"]
-    LOCAL --> DATA["샘플 매장 / 메뉴 / 주문 응답"]
+    LOCAL --> DATA["내장 메뉴"]
+    UI --> NEARBY["NearbyFinder · 매장 탐색"]
+    LOCATION["Pleos Fused Location · 현재 위치"] --> NEARBY
+    NEARBY --> PLACES["네이버 지도 · 실제 장소 검색"]
+    NEARBY --> CACHE["StoreCache · 최근 조회 매장"]
     UI --> NAV["Pleos NaviHelper · 길안내"]
     UI --> TTS["Pleos TTS · 한국어 주문 재생"]
     TTS --> FALLBACK["호환 경로 · Android TTS"]
     UI --> WINDOW["Pleos Vehicle · 운전석 창문"]
-    API -. "향후 HTTP 구현으로 연결" .-> SERVER["Pichle 서버 · 개발 계획"]
-    SERVER -.-> PARTNER["제휴 매장 주문 클라이언트"]
+    UI --> HTTP["DillOrderClient · HTTP 주문"]
+    HTTP --> SERVER["dill · FastAPI"]
+    SERVER --> ORM["SQLAlchemy ORM · Session"]
+    ORM --> DATABASE["PostgreSQL · 주문 / 수령 코드"]
+    SERVER --> LOGS["JSON 로그 · 날짜별 회전 / 호스트 볼륨"]
+    MANAGER["매니저 웹 화면 · Redux"] --> SERVER
+    SERVER -- "WebSocket 주문 스냅샷" --> MANAGER
     SERVER -.-> ESTIMATE["방문 신호 집계 / 혼잡도 추정"]
 ```
 
 실선은 현재 앱의 연결 구조, 점선은 향후 서버 연동 계획입니다. 계획서에서 검토한 Naver Maps Directions 15, 외부 AI 서비스와 NAVER CLOVA Voice는 현재 앱에 연결되어 있지 않습니다. 현재 음성 출력은 Pleos TTS를 우선 사용합니다.
 
-### API 연결 계약 초안
+### 주문 API
 
-현재 [PichleApi](app/src/main/java/ooo/ionya/driveaway/PichleApi.java)의 구현체는 [LocalPichleApi](app/src/main/java/ooo/ionya/driveaway/LocalPichleApi.java)입니다. 실제 서비스 연결 시 HTTP 구현체를 작성하고 앱에서 사용하는 구현체를 교체할 수 있습니다. 아래 엔드포인트는 제안 계약이며, 동작 중인 서버 API를 뜻하지 않습니다.
+주문 전송은 [DillOrderClient](app/src/main/java/ooo/ionya/driveaway/DillOrderClient.java)가 담당합니다. `LocalPichleApi`는 내장 메뉴 조회에만 사용하며 로컬 수령 코드를 만들지 않습니다. 상세 요청·응답 계약은 [dill 문서](dill/README.md)를 참고하세요. 주변 매장·브랜드 메뉴 조회는 기존 조회 경로를 유지합니다.
 
-| 기능 | 제안 계약 | 주요 데이터 |
+매니저용 주문 조회·매장 목록·상태 변경 HTTP API는 `Authorization: Bearer <accessToken>`으로 인증합니다. JWT는 10분(600초) 동안 유효하며 별도 refresh token은 없습니다. 매니저 화면은 토큰을 Redux 메모리의 `auth.accessToken`에 저장하고 쿠키·localStorage·persist에는 저장하지 않습니다. 페이지를 새로 열거나 새로고침하면 다시 로그인합니다.
+
+주문 목록은 `/v1/manager/ws` WebSocket으로 받습니다. 연결 후 토큰으로 인증하고 주문 접수·상태 변경이 커밋되면 서버가 최신 목록을 전송합니다. 3초 HTTP 폴링은 사용하지 않습니다. 연결 중에는 8분(480초)마다 `NEW_TOKEN`을 요청하며, 현재 JWT가 유효할 때만 새 10분 토큰을 받습니다. 만료 후에는 다시 로그인합니다. 앱의 주문 접수 API는 기존 `X-API-Key` 헤더를 검사하며 DB 접속 정보와 매니저 비밀번호는 앱에 포함하지 않습니다.
+
+현재 Pleos 연동 키는 `pichle-pleos-pt-2026`입니다. 앱의 `DillOrderClient.APP_API_KEY`와 서버의 `dill/app/core/security.py`에서 같은 값을 사용합니다. 앱 키는 주문 전송용이며 매니저 조회·상태 변경 권한을 대신하지 않습니다.
+
+| 기능 | 경로 | 주요 데이터 |
 | --- | --- | --- |
-| 주변 매장·혼잡도 | `GET /v1/stores?areaId={coarseAreaId}` | 매장, 거리, 이동분, 예상 대기분, 전자 주문 지원 여부 |
-| 매장 메뉴 | `GET /v1/stores/{storeId}/menu` | 상품, 가격, 옵션 |
-| 제휴 주문 | `POST /v1/orders` | 주문 요청, 주문 ID, 접수 상태, 픽업 안내 |
-| 방문 신호 | `POST /v1/visit-signals` | 매장 ID, 구간 체류·정차·주행 시간과 거리 |
+| 주문 접수 | `POST /v1/orders` | 전송 ID, 매장, 메뉴·수량·옵션, 수령 코드 |
+| 주문 목록 | `GET /v1/orders` | 매장·상태 필터, 주문 목록과 총 개수 |
+| 주문 한 건 | `GET /v1/orders/{orderId}` | 접수된 주문과 현재 상태 |
+| 상태 변경 | `PATCH /v1/orders/{orderId}/status` | 접수 → 준비 중 → 준비 완료 → 수령 완료, 취소 |
+| 매니저 매장 목록 | `GET /v1/stores` | 접수된 주문의 매장 ID와 이름 |
+| 매니저 실시간 연결 | `WS /v1/manager/ws` | JWT 인증, 주문 스냅샷, 토큰 갱신 |
+
+방문 신호 수집·혼잡도 추정 서버는 아직 구현하지 않았습니다.
 
 ## 성장 목표와 확장 계획
 
@@ -127,15 +164,19 @@ flowchart LR
 | 길안내 | Pleos NaviHelper 3.0.5 |
 | 음성 출력 | Pleos TextToSpeech 3.3.1 / Android 한국어 TTS 호환 경로 |
 | 차량 제어 | Pleos Vehicle 2.3.2 |
+| 주문 서버 | FastAPI, Pydantic DTO, SQLAlchemy 2 ORM·Session, PostgreSQL |
+| 매니저 화면·인증 | Redux, WebSocket, PyJWT Bearer JWT·10분 유효·메모리 저장 |
+| 서버 로깅 | JSON, 요청 ID, 한국 시간 자정 기준 파일 회전 |
 | 앱 버전 | `0.1.0` |
 
 ### 주행 중 화면
 
-실행 화면인 `MainActivity`에만 Distraction Optimization(DO)을 선언하고, `CarUxRestrictionsManager`의 현재 상태와 변경 이벤트에 맞춰 화면을 전환합니다.
+`MainActivity`와 `DeveloperActivity`에 Distraction Optimization(DO)을 선언하고, `CarUxRestrictionsManager`의 현재 상태와 변경 이벤트를 구독합니다. 일반 주문 화면은 매장 선택부터 수령까지 기존 단계를 유지하며, 기어가 D이거나 DO가 필요한 기본 상태라는 이유만으로 별도 간단 화면으로 전환하지 않습니다.
 
-- 차량 상태 연결을 확인하기 전과 주행 제한 중에는 매장·메뉴 선택, 입력, 전자 주문, 창문 제어, 개발자 화면을 잠급니다.
-- 주행 중에는 이미 선택한 목적지의 길안내와 준비된 주문 음성만 간단한 화면으로 제공합니다. 추가 조작은 플랫폼의 제한 플래그를 따릅니다.
-- 주차 상태로 돌아오면 기존 주문 화면과 장바구니를 복원합니다. 일반 Android 기기에는 차량용 주행 제한을 적용하지 않습니다.
+- 차량 상태 연결을 확인하기 전에는 대기합니다. 연결 후 활성 제한 플래그가 `0`이면 일반 주문 화면을 추가로 제한하지 않습니다.
+- 실제 플래그에 따라 키보드, 필터, 표시 문자열 길이, 누적 콘텐츠 수와 화면 깊이를 각각 제한합니다. 작성 중인 주문과 장바구니는 유지합니다.
+- 창문 제어 요청의 허용 여부는 차량 서비스의 권한과 지원 상태를 따릅니다. 개발자 화면은 활성 제한 플래그가 없을 때 이용할 수 있으며, 상세 진단 결과는 플랫폼의 화면 제한 중에는 표시하지 않습니다.
+- 일반 Android 기기에는 차량용 주행 제한을 적용하지 않습니다.
 
 ### 빌드 및 실행
 
@@ -163,6 +204,8 @@ Pleos 길안내·음성·차량 제어는 해당 서비스를 제공하는 Pleos
 
 ### 연동 동작과 검증 범위
 
+이번 배포 경로·JSON 로깅·ORM 변경에서는 배포·서버 실행·DB 접속·빌드·테스트를 수행하지 않았습니다. 아래 확인 기록은 기존 프로젝트의 실행 기록입니다.
+
 - **NaviHelper**: 초기화와 리스너 등록 후 `requestRoute` → `requestNavigationScreen(Foreground)` 순으로 호출하고 결과 콜백을 확인합니다.
 - **TTS**: `Mode.ON_DEVICE`로 Pleos 음성 출력을 요청합니다. 초기화·재생에 실패하면 Android 한국어 TTS로 전환하며 시작·완료·실패 상태를 표시합니다.
 - **Vehicle**: 운전석(`ROW_1_LEFT`) 창문의 쓰기 지원과 위치 최댓값을 확인한 뒤 `setWindowPosition`을 호출합니다. 최대 8초 동안 현재 위치를 재조회하며 실제 값이 최댓값에 도달했을 때만 내림 완료로 표시합니다.
@@ -180,7 +223,15 @@ Pleos 길안내·음성·차량 제어는 해당 서비스를 제공하는 Pleos
 | [MainActivity.java](app/src/main/java/ooo/ionya/driveaway/MainActivity.java) | 화면 구성, 매장 탐색, 메뉴·장바구니·주문·수령 흐름 |
 | [OrderFlow.java](app/src/main/java/ooo/ionya/driveaway/OrderFlow.java) | 화면 단계 정의 |
 | [PichleApi.java](app/src/main/java/ooo/ionya/driveaway/PichleApi.java) | 매장·메뉴·주문·방문 신호 인터페이스 |
-| [LocalPichleApi.java](app/src/main/java/ooo/ionya/driveaway/LocalPichleApi.java) | 로컬 샘플 데이터와 주문 응답 |
+| [LocalPichleApi.java](app/src/main/java/ooo/ionya/driveaway/LocalPichleApi.java) | 내장 매장·메뉴 데이터 |
+| [DillOrderClient.java](app/src/main/java/ooo/ionya/driveaway/DillOrderClient.java) | HTTP 주문 전송, 수령 코드 확인, 서버 주소 설정 |
+| [dill/run.py](dill/run.py) | HTTP 서버 실행 진입점 |
+| [dill/init.sql](dill/init.sql) | 기동 전 수동으로 실행할 테이블·인덱스 생성 SQL |
+| [dill/app/main.py](dill/app/main.py) | FastAPI 앱과 라우터·미들웨어 조립 |
+| [dill/app/core](dill/app/core) | 설정, DB Session, 로깅, 인증과 공통 미들웨어 |
+| [dill/app/router](dill/app/router) | 주문·매니저·페이지 HTTP 라우터 |
+| [dill/app/model](dill/app/model) | SQLAlchemy ORM 모델과 저장소 |
+| [dill/app/schema](dill/app/schema) | Pydantic 요청·응답 DTO |
 | [OrderSpeechController.java](app/src/main/java/ooo/ionya/driveaway/OrderSpeechController.java) | Pleos TTS와 Android TTS 재생 제어 |
 | [PleosNavigation.java](app/src/main/java/ooo/ionya/driveaway/PleosNavigation.java) | 목적지 경로 탐색과 내비게이션 연동 |
 | [PleosWindowController.java](app/src/main/java/ooo/ionya/driveaway/PleosWindowController.java) | 운전석 창문 제어와 위치 확인 |

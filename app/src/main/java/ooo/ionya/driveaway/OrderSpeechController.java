@@ -43,14 +43,6 @@ public final class OrderSpeechController implements AutoCloseable {
     private int volumeStream = -1, previousVolume = -1, requestedVolume = -1;
     private String volumeNotice = "";
     private FinishListener finishListener;
-    private final Runnable volumeLock = new Runnable() {
-        @Override public void run() {
-            if (audio == null || volumeStream < 0 || engine == Engine.CLOSED) return;
-            try { if (audio.getStreamVolume(volumeStream) != requestedVolume) audio.setStreamVolume(volumeStream, requestedVolume, 0); }
-            catch (RuntimeException ignored) { }
-            main.postDelayed(this, 250);
-        }
-    };
 
     private final EventListener pleosEvents = new EventListener() {
         @Override public void onReady() { }
@@ -165,6 +157,8 @@ public final class OrderSpeechController implements AutoCloseable {
         engine = Engine.STARTING_ANDROID;
         ++generation;
         releasePleos();
+        restoreSpeechVolume();
+        abandonFocus();
         status("기기의 음성 출력을 준비하고 있습니다.");
         int token = generation;
         try {
@@ -212,7 +206,10 @@ public final class OrderSpeechController implements AutoCloseable {
     }
 
     private void started() {
+        if (playbackStarted) return;
         playbackStarted = true;
+        // Reapply when speech actually starts, after the vehicle has routed its audio.
+        maximizeSpeechVolume();
         status("주문을 읽고 있습니다.");
         int token = generation;
         long limit = Math.max(30000L, activeText.length() * 350L + 15000L);
@@ -272,37 +269,36 @@ public final class OrderSpeechController implements AutoCloseable {
 
     /** Change volume only for an explicit playback request, never while preparing the engine. */
     private void maximizeSpeechVolume() {
-        if (audio == null || volumeStream >= 0) return;
+        if (audio == null) return;
         try {
             if (audio.isVolumeFixed()) {
                 volumeNotice = "차량 설정에서 음량을 조절해주세요.";
                 return;
             }
-            int stream = attributes.getVolumeControlStream();
-            if (stream < 0) stream = AudioManager.STREAM_MUSIC;
-            int maximum = audio.getStreamMaxVolume(stream);
-            if (maximum <= 0) return;
-            // Navigation speech uses the stream selected by its AudioAttributes, not the alarm/call stream.
-            previousVolume = audio.getStreamVolume(stream);
-            requestedVolume = maximum;
-            volumeStream = stream;
-            audio.setStreamVolume(stream, maximum, 0);
-            if (audio.getStreamVolume(stream) != maximum)
+            if (volumeStream < 0) {
+                int stream = attributes.getVolumeControlStream();
+                if (stream < 0) stream = AudioManager.STREAM_MUSIC;
+                int maximum = audio.getStreamMaxVolume(stream);
+                if (maximum <= 0) return;
+                // Both engines use these speech attributes; preserve the value only once.
+                previousVolume = audio.getStreamVolume(stream);
+                requestedVolume = maximum;
+                volumeStream = stream;
+            }
+            audio.setStreamVolume(volumeStream, requestedVolume, 0);
+            if (audio.getStreamVolume(volumeStream) != requestedVolume)
                 volumeNotice = "차량 설정에서 음량을 조절해주세요.";
-            // Keep it at maximum for the whole playback, even if something lowers it.
-            main.removeCallbacks(volumeLock);
-            main.postDelayed(volumeLock, 250);
         } catch (RuntimeException error) {
             volumeNotice = "차량 설정에서 음량을 조절해주세요.";
         }
     }
 
     private void restoreSpeechVolume() {
-        main.removeCallbacks(volumeLock);
         if (audio == null || volumeStream < 0) return;
         try {
-            // The volume was held at maximum during playback, so put the original value back.
-            if (previousVolume >= 0) audio.setStreamVolume(volumeStream, previousVolume, 0);
+            // Preserve any adjustment the user made after playback started.
+            if (previousVolume >= 0 && audio.getStreamVolume(volumeStream) == requestedVolume)
+                audio.setStreamVolume(volumeStream, previousVolume, 0);
         } catch (RuntimeException ignored) {
             volumeNotice = "기존 음량은 차량 설정에서 조절해주세요.";
         } finally {

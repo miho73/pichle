@@ -12,6 +12,7 @@ import android.view.View;
 import android.widget.AdapterView;
 import android.widget.ArrayAdapter;
 import android.widget.Button;
+import android.widget.EditText;
 import android.widget.LinearLayout;
 import android.widget.ScrollView;
 import android.widget.Spinner;
@@ -32,7 +33,7 @@ import java.util.LinkedHashMap;
 import java.util.Locale;
 import java.util.Map;
 
-/** Hidden, read-only SDK console. No probes run until a user presses a query button. */
+/** Hidden SDK console and connection settings. Probes run only after an explicit query. */
 public final class DeveloperActivity extends AppCompatActivity {
     private static final int MAX_EVENTS = 80;
     private int background, surface, ink, muted, primary, onPrimary, divider;
@@ -49,6 +50,8 @@ public final class DeveloperActivity extends AppCompatActivity {
     private CarUxGate uxGate;
     private CarUxGate.State uxState;
     private boolean destroyed, foreground;
+    private DillOrderClient orderClient;
+    private String serverUrlDraft;
 
     @Override public void onCreate(Bundle state) {
         super.onCreate(state);
@@ -58,6 +61,9 @@ public final class DeveloperActivity extends AppCompatActivity {
         primary = getColor(R.color.pichle_primary); onPrimary = getColor(R.color.pichle_on_primary);
         divider = getColor(R.color.pichle_divider);
         restore(state);
+        orderClient = new DillOrderClient(this);
+        serverUrlDraft = state == null ? orderClient.getBaseUrl()
+                : state.getString("serverUrlDraft", orderClient.getBaseUrl());
         permissionRequest = registerForActivityResult(new ActivityResultContracts.RequestMultiplePermissions(), grants -> {
             Runnable action = pendingLocationAction; pendingLocationAction = null;
             if (!canUseDiagnostics()) return;
@@ -106,7 +112,7 @@ public final class DeveloperActivity extends AppCompatActivity {
         setContentView(root);
         LinearLayout header = row(); header.setPadding(dp(24), dp(12), dp(24), dp(12)); header.setBackgroundColor(surface);
         header.addView(text("개발자 모드", 26, ink, true), new LinearLayout.LayoutParams(0, -2, 1));
-        if (canUseDiagnostics()) header.addView(button("JSON 복사", false, this::copyResults), params(dp(144), dp(52)));
+        if (canUseDiagnostics() && !tab.equals("주문 서버")) header.addView(button("JSON 복사", false, this::copyResults), params(dp(144), dp(52)));
         Button close = button("닫기", false, this::finish);
         close.setOnClickListener(view -> finish());
         LinearLayout.LayoutParams closeLp = params(dp(96), dp(52)); closeLp.setMarginStart(dp(12)); header.addView(close, closeLp);
@@ -114,13 +120,13 @@ public final class DeveloperActivity extends AppCompatActivity {
         if (!canUseDiagnostics()) {
             LinearLayout message = column();
             message.setPadding(dp(28), dp(32), dp(28), dp(28));
-            message.addView(text("주차 후 이용해주세요", 28, ink, true));
-            add(message, text("개발자 모드는 주차 중에만 사용할 수 있습니다.", 19, muted, false), 14);
+            message.addView(text("차량 화면 제한 적용 중", 28, ink, true));
+            add(message, text("상세 진단은 화면 제한이 해제되면 이용할 수 있습니다.", 19, muted, false), 14);
             root.addView(message, params(-1, -2));
             return;
         }
         LinearLayout tabs = row(); tabs.setPadding(dp(24), dp(16), dp(24), dp(16));
-        for (String name : new String[]{"위치", "주행 정보", "결과 로그"}) {
+        for (String name : new String[]{"위치", "주행 정보", "결과 로그", "주문 서버"}) {
             Button select = button(name, name.equals(tab), () -> { tab = name; render(); });
             LinearLayout.LayoutParams p = new LinearLayout.LayoutParams(0, dp(56), 1);
             if (tabs.getChildCount() > 0) p.setMarginStart(dp(8)); tabs.addView(select, p);
@@ -131,7 +137,50 @@ public final class DeveloperActivity extends AppCompatActivity {
         root.addView(scroll, new LinearLayout.LayoutParams(-1, 0, 1));
         if (tab.equals("위치")) locationPage();
         else if (tab.equals("주행 정보")) vehiclePage();
+        else if (tab.equals("주문 서버")) orderServerPage();
         else logPage();
+    }
+
+    private void orderServerPage() {
+        LinearLayout settings = panel();
+        settings.addView(text("주문 서버", 24, ink, true));
+        add(settings, text("피클 주문을 받을 dill 서버의 주소를 입력하세요.", 17, muted, false), 10);
+        EditText address = new EditText(this);
+        address.setSingleLine(true);
+        address.setInputType(android.text.InputType.TYPE_CLASS_TEXT | android.text.InputType.TYPE_TEXT_VARIATION_URI);
+        address.setFilters(new android.text.InputFilter[]{new android.text.InputFilter.LengthFilter(2048)});
+        address.setTextSize(18); address.setTextColor(ink); address.setHintTextColor(muted);
+        address.setHint(DillOrderClient.DEFAULT_BASE_URL); address.setText(serverUrlDraft);
+        address.setPadding(dp(12), dp(12), dp(12), dp(12));
+        address.setContentDescription("주문 서버 주소");
+        address.addTextChangedListener(new android.text.TextWatcher() {
+            @Override public void beforeTextChanged(CharSequence value, int start, int count, int after) { }
+            @Override public void onTextChanged(CharSequence value, int start, int before, int count) { }
+            @Override public void afterTextChanged(android.text.Editable value) { serverUrlDraft = value.toString(); }
+        });
+        add(settings, address, 18);
+        LinearLayout actions = row();
+        weighted(actions, button("저장", true, () -> {
+            try {
+                orderClient.setBaseUrl(serverUrlDraft);
+                serverUrlDraft = orderClient.getBaseUrl();
+                Toast.makeText(this, "주문 서버 주소를 저장했습니다.", Toast.LENGTH_SHORT).show();
+                render();
+            } catch (IllegalArgumentException error) { address.setError(error.getMessage()); }
+        }));
+        weighted(actions, button("기본값", false, () -> {
+            orderClient.resetBaseUrl(); serverUrlDraft = orderClient.getBaseUrl(); render();
+            Toast.makeText(this, "기본 서버 주소로 변경했습니다.", Toast.LENGTH_SHORT).show();
+        }));
+        add(settings, actions, 14); body.addView(settings, params(-1, -2));
+        LinearLayout help = panel();
+        help.addView(text("매니저 화면", 22, ink, true));
+        TextView manager = raw(orderClient.getManagerUrl()); add(help, manager, 12);
+        add(help, text("브라우저에서 매니저 화면에 로그인하면 접수된 주문을 확인할 수 있습니다.", 17, muted, false), 12);
+        add(help, text("기본 주소는 https://pichle.ionya.ooo입니다. 기본값을 누르면 이 주소로 돌아갑니다.", 16, muted, false), 12);
+        add(help, text("로컬 개발 서버를 사용할 때만 주소를 변경해주세요. HTTP는 지정된 개발용 호스트에만 허용됩니다.", 16, muted, false), 12);
+        add(help, text("주소 저장 시 서버에 요청을 보내지 않습니다. 주문을 전송할 때 저장한 주소를 사용합니다.", 16, muted, false), 12);
+        add(body, help, 16);
     }
 
     private void locationPage() {
@@ -287,6 +336,7 @@ public final class DeveloperActivity extends AppCompatActivity {
 
     @Override protected void onSaveInstanceState(Bundle state) {
         state.putString("tab", tab); state.putString("domain", domain); state.putString("location", locationResult);
+        state.putString("serverUrlDraft", serverUrlDraft);
         JSONArray values = new JSONArray();
         for (Map.Entry<String, Result> entry : results.entrySet()) try {
             JSONObject item = new JSONObject(); item.put("id", entry.getKey()); item.put("status", entry.getValue().status);
@@ -343,7 +393,9 @@ public final class DeveloperActivity extends AppCompatActivity {
         GradientDrawable bg = fill(surface); bg.setStroke(dp(1), divider); v.setBackground(bg); return v;
     }
     private TextView text(String value, int size, int color, boolean bold) {
-        TextView v = new TextView(this); v.setText(value); v.setTextSize(size); v.setTextColor(color);
+        TextView v = new TextView(this);
+        v.setText(uxState != null && uxState.connected ? uxState.limitText(value) : value);
+        v.setTextSize(size); v.setTextColor(color);
         if (bold) v.setTypeface(null, Typeface.BOLD); return v;
     }
     private TextView raw(String value) {

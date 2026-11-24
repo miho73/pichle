@@ -1,19 +1,20 @@
 package ooo.ionya.driveaway;
 
 import java.util.List;
+import java.util.ArrayList;
+import java.util.Collections;
 
 /**
- * Mobile-to-server contract for the MVP. The demo screen currently uses local sample data;
- * replace this interface with the app's HTTP client when the Pichle service is available.
+ * Menu data and the structured order contract shared with the dill HTTP service.
  */
 public interface PichleApi {
-    /** GET /v1/stores?areaId={coarseAreaId}; never send exact GPS coordinates. */
+    /** Embedded catalog; live nearby search uses NearbyFinder without sending exact GPS. */
     List<StoreSummary> findNearbyStores(String coarseAreaId) throws Exception;
 
-    /** GET /v1/stores/{storeId}/menu */
+    /** Embedded menu lookup. Brand menus are obtained separately by BrandMenuFetcher. */
     List<MenuItem> getMenu(String storeId) throws Exception;
 
-    /** POST /v1/orders (partner stores only; explicit user confirmation required) */
+    /** POST /v1/orders; explicit user confirmation required. */
     OrderReceipt submitOrder(OrderRequest request) throws Exception;
 
     /** POST /v1/visit-signals; accepts only coarse, store-scoped, non-identifying signals. */
@@ -43,11 +44,44 @@ public interface PichleApi {
     }
 
     final class OrderRequest {
-        public final String storeId;
+        public final String clientRequestId, storeId, storeName;
+        public final List<OrderLine> items;
         public final List<String> menuItemIds;
         public final String customerNote;
+
+        public OrderRequest(String clientRequestId, String storeId, String storeName,
+                            List<OrderLine> items, String customerNote) {
+            this.clientRequestId = clientRequestId;
+            this.storeId = storeId;
+            this.storeName = storeName;
+            this.items = Collections.unmodifiableList(new ArrayList<>(items));
+            ArrayList<String> ids = new ArrayList<>();
+            for (OrderLine item : items) ids.add(item.menuItemId);
+            this.menuItemIds = Collections.unmodifiableList(ids);
+            this.customerNote = customerNote == null ? "" : customerNote;
+        }
+
+        @Deprecated
         public OrderRequest(String storeId, List<String> menuItemIds, String customerNote) {
-            this.storeId=storeId; this.menuItemIds=menuItemIds; this.customerNote=customerNote;
+            this(java.util.UUID.randomUUID().toString(), storeId, storeId,
+                    legacyItems(menuItemIds), customerNote);
+        }
+
+        private static List<OrderLine> legacyItems(List<String> ids) {
+            ArrayList<OrderLine> items = new ArrayList<>();
+            for (String id : ids) items.add(new OrderLine(id, id, 1, null, ""));
+            return items;
+        }
+    }
+
+    final class OrderLine {
+        public final String menuItemId, name, options;
+        public final int quantity;
+        public final Integer unitPriceKrw;
+
+        public OrderLine(String menuItemId, String name, int quantity, Integer unitPriceKrw, String options) {
+            this.menuItemId = menuItemId; this.name = name; this.quantity = quantity;
+            this.unitPriceKrw = unitPriceKrw; this.options = options == null ? "" : options;
         }
     }
 
